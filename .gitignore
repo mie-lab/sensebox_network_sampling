@@ -1,0 +1,14 @@
+# Data
+input/
+
+# Python
+__pycache__/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# PyCharm
+.idea/
+
+# Caches
+.cache/
