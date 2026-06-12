@@ -1,0 +1,19 @@
+name: sensebox_network_sampling
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - contextily
+  - geopandas
+  - jupyter
+  - matplotlib
+  - networkx
+  - notebook
+  - numpy
+  - osmnx
+  - pandas
+  - python=3.14
+  - scikit-learn
+  - scipy
+  - conda-forge::statsmodels
+prefix: C:\Users\agrisiute\AppData\Local\anaconda3\envs\sensebox_network_sampling
