@@ -62,7 +62,7 @@ conda activate sensebox_network_sampling
 Run with:
 
 ```bash
-python senseboxbike_preprocessing.py
+python network_preprocessing.py
 ```
 
 The OSM download is cached — delete `input/muenster_bike.graphml` or call
