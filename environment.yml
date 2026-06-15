@@ -16,4 +16,5 @@ dependencies:
   - scikit-learn
   - scipy
   - conda-forge::statsmodels
-prefix: C:\Users\agrisiute\AppData\Local\anaconda3\envs\sensebox_network_sampling
+  - pip:
+      - leuvenmapmatchingprefix
