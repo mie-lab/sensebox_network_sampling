@@ -129,7 +129,7 @@ def classify_edge_type(edges):
     LANE_VALS = {"lane", "shared_lane", "share_busway", "opposite_lane"}
     TRACK_VALS = {"track", "opposite_track"}
     MAIN = {"primary", "primary_link", "secondary", "secondary_link",
-            "tertiary", "tertiary_link", "trunk", "trunk_link"} # unclassified not here. To think whether include.
+            "tertiary", "tertiary_link", "trunk", "trunk_link"}  # unclassified not here. To think whether include.
 
     sidepath = e["is_sidepath"]
     shared_path = hw.isin(["path", "footway"])
