@@ -1,8 +1,12 @@
 """senseBox overtaking points -> per-rider trajectories, overtake events, summary.
 
-Points are split into trajectories by boxId then temporal gap. GPS glitches are
-dropped by clipping to the saved network graph's bbox. Overtake events collapse
-the ~1Hz bursts into one row per pass, linked to trajectories by traj_id.
+Points are split into trajectories by boxId then temporal gap, clipped to the
+network bbox. Overtake events collapse ~1Hz nonzero bursts into one row per pass,
+linked to trajectories by traj_id and carrying the first/last point id of the
+burst so events can be relocated on a map-matched path.
+
+If output/diagnostics/trajectory_quality.csv exists, only its kept trajectories
+are processed into events (run trajectory_diagnostics.py first).
 """
 from pathlib import Path
 import sys
@@ -14,7 +18,6 @@ import pandas as pd
 from matplotlib import pyplot as plt
 from shapely.geometry import LineString
 
-# --- config -----------------------------------------------------------------
 CRS_WGS84 = "EPSG:4326"
 CRS_METRIC = "EPSG:25832"            # UTM 32N, same as the network graph
 BOX_ID_COL = "boxId"
@@ -22,23 +25,23 @@ BOX_ID_COL = "boxId"
 GRAPH_PATH = Path("input/muenster_bike.graphml")
 INPUT_CSV = Path("input/opensensemap_overtaking_distances.csv")
 OUT_DIR = Path("output")
+QUALITY_CSV = OUT_DIR / "diagnostics/trajectory_quality.csv"
 PLOT_PATH = OUT_DIR / "trajectories.png"
 POINTS_PATH = OUT_DIR / "trajectory_points.gpkg"
 SUMMARY_PATH = OUT_DIR / "trajectory_summary.csv"
 EVENTS_PATH = OUT_DIR / "overtake_events.gpkg"
 
-GAP_MINUTES = 10                     # gap that starts a new trajectory
-MIN_POINTS = 5                       # drop trajectories shorter than this
-OVERTAKE_THRESHOLD = 0               # value (cm) above which a point is an overtake
+GAP_MINUTES = 10
+MIN_POINTS = 5
+OVERTAKE_THRESHOLD = 0               # value (cm) above which a point is a detection
 CLOSE_PASS_CM = 150                  # legal minimum clearance in town (DE)
 MERGE_GAP_S = 3                      # gap below which two bursts are one event
 BBOX_PAD_M = 2000
 MAX_LEGEND = 15
-MIN_LENGTH_KM = 0.2                  # below this a per-km rate is meaningless
+MIN_LENGTH_KM = 0.2
 
 
 def bbox_from_graph(graph_path=GRAPH_PATH, pad_m=BBOX_PAD_M):
-    """Study-area bbox (minx, miny, maxx, maxy) in metres from the saved graph."""
     G = ox.load_graphml(graph_path)
     nodes, _ = ox.graph_to_gdfs(G)
     minx, miny, maxx, maxy = nodes.total_bounds
@@ -46,7 +49,6 @@ def bbox_from_graph(graph_path=GRAPH_PATH, pad_m=BBOX_PAD_M):
 
 
 def load_points(csv_path=INPUT_CSV, bbox=None):
-    """Read the CSV into a projected, time-sorted GeoDataFrame; clip to bbox."""
     df = pd.read_csv(csv_path)
     df["createdAt"] = pd.to_datetime(df["createdAt"], utc=True)
     df["value"] = pd.to_numeric(df["value"], errors="coerce")
@@ -67,7 +69,6 @@ def load_points(csv_path=INPUT_CSV, bbox=None):
 
 
 def segment_trajectories(gdf, gap_minutes=GAP_MINUTES, min_points=MIN_POINTS):
-    """Split each box's stream into trajectories on temporal gaps; drop short ones."""
     g = gdf.copy()
     dt = g.groupby(BOX_ID_COL)["createdAt"].diff()
     new_traj = dt.isna() | (dt > pd.Timedelta(minutes=gap_minutes))
@@ -79,19 +80,42 @@ def segment_trajectories(gdf, gap_minutes=GAP_MINUTES, min_points=MIN_POINTS):
     return g[counts >= min_points].reset_index(drop=True)
 
 
+def load_good_traj_ids(quality_csv=QUALITY_CSV):
+    """Kept traj_ids from the diagnostics run, or None if it hasn't run yet."""
+    if not Path(quality_csv).exists():
+        print(f"[scope] {quality_csv} not found -> processing ALL trajectories")
+        return None
+    q = pd.read_csv(quality_csv)
+    good = set(q.loc[q["keep"], "traj_id"])
+    print(f"[scope] {len(good)} good trajectories from {quality_csv}")
+    return good
+
+
+def scope_to_good(gdf, good_ids):
+    """Keep only points whose trajectory passed diagnostics."""
+    if good_ids is None:
+        return gdf
+    return gdf[gdf["traj_id"].isin(good_ids)].reset_index(drop=True)
+
+
+def add_point_id(gdf):
+    """Stable per-point id so events can reference their first/last sample."""
+    g = gdf.sort_values(["traj_id", "createdAt"]).reset_index(drop=True)
+    g["point_id"] = g["traj_id"] + "_p" + g.groupby("traj_id").cumcount().astype(str)
+    return g
+
+
 def bearing_along(gdf_traj):
-    """Per-point travel bearing (0-360, 0=N) from the previous point."""
     x = gdf_traj.geometry.x.values
     y = gdf_traj.geometry.y.values
     east = np.diff(x, prepend=x[0])
     north = np.diff(y, prepend=y[0])
-    bearing = np.degrees(np.arctan2(east, north)) % 360  # east/north -> compass bearing
+    bearing = np.degrees(np.arctan2(east, north)) % 360
     bearing[0] = bearing[1] if len(bearing) > 1 else 0.0
     return bearing
 
 
 def add_bearings(gdf):
-    """Attach a per-point travel bearing, computed within each trajectory."""
     out = gdf.copy().sort_values(["traj_id", "createdAt"])
     parts = [pd.Series(bearing_along(t), index=t.index)
              for _, t in out.groupby("traj_id", sort=False)]
@@ -100,7 +124,6 @@ def add_bearings(gdf):
 
 
 def trajectory_lines(gdf, color_by=BOX_ID_COL):
-    """One LineString per trajectory, with its colour key (built in one pass)."""
     records = []
     for traj_id, t in gdf.groupby("traj_id"):
         t = t.sort_values("createdAt")
@@ -118,14 +141,16 @@ def extract_overtake_events(gdf, overtake_threshold=OVERTAKE_THRESHOLD,
                             merge_gap_s=MERGE_GAP_S):
     """Collapse nonzero-reading bursts into one row per overtake event.
 
-    Linked to its trajectory by traj_id; identified globally by event_uid.
-    geometry is the point of closest approach (min clearance).
+    Linked to its trajectory by traj_id; identified by event_uid. geometry is the
+    closest-approach point. first_point_id/last_point_id bound the burst so the
+    event can be relocated on a map-matched path. Requires a point_id column.
     """
     g = gdf[gdf["value"] > overtake_threshold].copy()
     g = g.sort_values(["traj_id", "createdAt"])
     cols = ["event_uid", "traj_id", "event_id", "boxId", "start", "end",
             "duration_s", "n_samples", "min_clearance_cm", "mean_clearance_cm",
-            "is_close", "geometry"]
+            "is_close", "first_point_id", "last_point_id", "closest_point_id",
+            "geometry"]
     if g.empty:
         return gpd.GeoDataFrame(columns=cols, geometry="geometry", crs=gdf.crs)
 
@@ -134,6 +159,7 @@ def extract_overtake_events(gdf, overtake_threshold=OVERTAKE_THRESHOLD,
     g["event_id"] = new_event.groupby(g["traj_id"]).cumsum()
 
     def one_event(e):
+        e = e.sort_values("createdAt")
         closest = e.loc[e["value"].idxmin()]
         return pd.Series({
             "boxId": e["boxId"].iloc[0],
@@ -144,6 +170,9 @@ def extract_overtake_events(gdf, overtake_threshold=OVERTAKE_THRESHOLD,
             "min_clearance_cm": e["value"].min(),
             "mean_clearance_cm": e["value"].mean(),
             "is_close": bool(e["value"].min() < CLOSE_PASS_CM),
+            "first_point_id": e["point_id"].iloc[0],
+            "last_point_id": e["point_id"].iloc[-1],
+            "closest_point_id": closest["point_id"],
             "geometry": closest.geometry,
         })
 
@@ -154,11 +183,6 @@ def extract_overtake_events(gdf, overtake_threshold=OVERTAKE_THRESHOLD,
 
 
 def summarise(gdf, events=None, min_length_km=MIN_LENGTH_KM):
-    """One row per trajectory: geometry/speed plus event-based overtake stats.
-
-    Counts are EVENTS, not raw samples. overtake_rate_per_km is NaN for
-    trajectories shorter than min_length_km.
-    """
     if events is None:
         events = extract_overtake_events(gdf)
 
@@ -186,7 +210,7 @@ def summarise(gdf, events=None, min_length_km=MIN_LENGTH_KM):
             "n_overtakes": eg.size(),
             "n_close_passes": eg["is_close"].sum(),
             "min_overtake_cm": eg["min_clearance_cm"].min(),
-            "mean_overtake_cm": eg["min_clearance_cm"].mean(),  # mean of per-event minima
+            "mean_overtake_cm": eg["min_clearance_cm"].mean(),
             "mean_event_duration_s": eg["duration_s"].mean(),
         })
     else:
@@ -204,7 +228,6 @@ def summarise(gdf, events=None, min_length_km=MIN_LENGTH_KM):
 
 
 def plot_trajectories(gdf, color_by=BOX_ID_COL, path=PLOT_PATH, edges=None, max_legend=MAX_LEGEND):
-    """Coverage plot: one LineString per trajectory, coloured by color_by."""
     lines = trajectory_lines(gdf, color_by=color_by)
     print(f"[plot] {len(lines)} trajectories | bounds {lines.total_bounds}")
 
@@ -240,7 +263,9 @@ if __name__ == "__main__":
     csv = Path(sys.argv[1]) if len(sys.argv) > 1 else INPUT_CSV
     bbox = bbox_from_graph()
 
-    pts = add_bearings(segment_trajectories(load_points(csv, bbox=bbox)))
+    pts = add_point_id(add_bearings(segment_trajectories(load_points(csv, bbox=bbox))))
+    pts = scope_to_good(pts, load_good_traj_ids())
+
     events = extract_overtake_events(pts)
     summ = summarise(pts, events=events)
 
@@ -249,60 +274,9 @@ if __name__ == "__main__":
     print(f"{len(events)} overtake events ({int(events['is_close'].sum())} close)")
     print(summ.head(15).to_string())
 
-    orphan = ~events["traj_id"].isin(summ.index)
-    if orphan.any():
-        print(f"[warn] {orphan.sum()} events have no matching trajectory")
-
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     plot_trajectories(pts)
     pts.to_file(POINTS_PATH, driver="GPKG")
     events.to_file(EVENTS_PATH, driver="GPKG")
     summ.to_csv(SUMMARY_PATH)
     print(f"saved: {POINTS_PATH.name}, {EVENTS_PATH.name}, {SUMMARY_PATH.name}")
-
-    bbox = bbox_from_graph()
-    pts = segment_trajectories(load_points(bbox=bbox))
-    v = pts["value"]
-
-    print("=" * 60)
-    print("1. RAW VALUE DISTRIBUTION (all points)")
-    print("=" * 60)
-    print(f"total points        : {len(v):,}")
-    print(f"value == 0          : {(v == 0).sum():,}  ({(v == 0).mean():.1%})")
-    print(f"value  > 0          : {(v > 0).sum():,}  ({(v > 0).mean():.1%})")
-    print(f"\nnonzero value stats (cm):")
-    nz = v[v > 0]
-    print(nz.describe(percentiles=[.01, .05, .1, .25, .5, .75, .9, .95, .99]).to_string())
-
-    print("\n" + "=" * 60)
-    print("2. LOW-END DETAIL (is there a noise floor?)")
-    print("=" * 60)
-    # how many nonzero readings sit at each low cm value
-    low = nz[nz <= 30]
-    print(f"nonzero readings <= 30 cm: {len(low):,} ({len(low) / len(nz):.1%} of nonzero)")
-    print("counts per cm, 1..30:")
-    print(low.round().value_counts().sort_index().to_string())
-
-    print("\n" + "=" * 60)
-    print("3. STUCK-SENSOR CHECK (overtake share per trajectory)")
-    print("=" * 60)
-    # share of points that are nonzero, per trajectory
-    share = pts.assign(nz=(pts["value"] > 0)).groupby("traj_id")["nz"].mean()
-    print("distribution of nonzero-share across trajectories:")
-    print(share.describe(percentiles=[.5, .75, .9, .95, .99]).to_string())
-    for thr in (0.3, 0.5, 0.7, 0.9):
-        n = (share > thr).sum()
-        print(f"  trajectories with >{thr:.0%} nonzero points: {n} "
-              f"({n / len(share):.1%})")
-
-    print("\n" + "=" * 60)
-    print("4. EVENT DURATION (are 'events' single blips or real passes?)")
-    print("=" * 60)
-    ev = extract_overtake_events(pts)
-    print(f"total events: {len(ev):,}")
-    print("event duration (s) distribution:")
-    print(ev["duration_s"].describe(percentiles=[.5, .9, .99]).to_string())
-    print(f"\nevents lasting 0 s (single sample): {(ev['duration_s'] == 0).sum():,} "
-          f"({(ev['duration_s'] == 0).mean():.1%})")
-    print("n_samples per event:")
-    print(ev["n_samples"].describe(percentiles=[.5, .9, .99]).to_string())
