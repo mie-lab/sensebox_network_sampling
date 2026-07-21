@@ -9,8 +9,8 @@ import pandas as pd
 
 GRAPH_PATH = Path("input/muenster_bike.graphml")
 EDGES_PATH = Path("input/muenster_edges_classified.gpkg")
-PLOT_PATH = Path("output/network_overview.png")
-INSPECT_DIR = Path("output/inspection")
+PLOT_PATH = Path("output/task1_network/network_overview_task1.png")
+INSPECT_DIR = Path("output/task1_network/inspection_task1")
 
 CRS_METRIC = "EPSG:25832"  # UTM 32N
 
@@ -184,7 +184,7 @@ def inspect_classification(edges, column="edge_class", out_dir=INSPECT_DIR):
 
     # 1. highway tag vs assigned class
     ct = pd.crosstab(_norm("highway", e), e[column], margins=True)
-    ct.to_csv(out_dir / "highway_vs_label.csv")
+    ct.to_csv(out_dir / "highway_vs_label_task1.csv")
     print("\n=== highway tag vs assigned class ===")
     print(ct.to_string())
 
@@ -200,7 +200,7 @@ def inspect_classification(edges, column="edge_class", out_dir=INSPECT_DIR):
             cond_matrix.T.astype(int) @ cond_matrix.astype(int),
             index=names, columns=names,
         )
-        overlap.to_csv(out_dir / "condition_overlap.csv")
+        overlap.to_csv(out_dir / "condition_overlap_task1.csv")
 
     # 3. 'other' should be ~empty; if not, a condition is missing
     n_other = (e[column] == "other").sum()
@@ -217,7 +217,7 @@ def inspect_classification(edges, column="edge_class", out_dir=INSPECT_DIR):
     km = e.groupby(column)["length"].sum() / 1000
     summary = pd.DataFrame({"km": km.round(1), "share": (km / km.sum()).round(3)})
     summary = summary.sort_values("km", ascending=False)
-    summary.to_csv(out_dir / "length_by_label.csv")
+    summary.to_csv(out_dir / "length_by_label_task1.csv")
     print("\n=== share of network by length (km) ===")
     print(summary.to_string())
 
@@ -235,7 +235,7 @@ def inspect_classification(edges, column="edge_class", out_dir=INSPECT_DIR):
         ax.set_axis_off()
     for ax in axes.flat[len(cats):]:
         ax.set_visible(False)
-    fig.savefig(out_dir / "labels_small_multiples.png", dpi=200, bbox_inches="tight")
+    fig.savefig(out_dir / "labels_small_multiples_task1.png", dpi=200, bbox_inches="tight")
     plt.close(fig)
 
 
