@@ -284,7 +284,7 @@ def plot_box_overview(gdf, path=OVERVIEW_PATH):
                  "(bigger/brighter = farther); overtake-seconds = classifier confident a car passed",
                  fontsize=13, y=1.005)
     path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(path, dpi=170, bbox_inches="tight")
+    fig.savefig(path, dpi=150, bbox_inches="tight")
     plt.close(fig)
     print(f"[plot] saved -> {path}")
 

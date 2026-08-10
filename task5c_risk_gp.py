@@ -57,7 +57,7 @@ EDGES = Path("input/muenster_edges_classified.gpkg")
 OUT = Path("output/task5_risk")
 FIG = Path("output/figures")
 ACC, ACC2 = "#2a78d6", "#e34948"
-N_TRAIN = 4000                            # GP training edges (exact Laplace is O(n^3); see ntrain_sweep)
+N_TRAIN = 2000                            # GP training edges (exact Laplace is O(n^3); see ntrain_sweep)
 NTRAIN_GRID = [1000, 2000, 3000, 4000]    # subsample sizes for the handicap check
 # Hyper-parameter grid, jointly picked by marginal likelihood. Re-centred on the last
 # run's answer: amp sat on the old floor (0.5) in 37 of 40 fits and nug often on the old
@@ -271,7 +271,7 @@ def fig_cv(perf):
     for sp in ("top", "right"):
         ax.spines[sp].set_visible(False)
     fig.tight_layout()
-    fig.savefig(FIG / "task5c_gp_cv.png", dpi=200, bbox_inches="tight")
+    fig.savefig(FIG / "task5c_gp_cv.png", dpi=150, bbox_inches="tight")
     plt.close(fig)
     print(f"  [fig] {FIG / 'task5c_gp_cv.png'}")
 
@@ -328,7 +328,7 @@ def fig_ntrain(sweep):
     for sp in ("top", "right"):
         ax.spines[sp].set_visible(False)
     fig.tight_layout()
-    fig.savefig(FIG / "task5c_gp_ntrain.png", dpi=200, bbox_inches="tight")
+    fig.savefig(FIG / "task5c_gp_ntrain.png", dpi=150, bbox_inches="tight")
     plt.close(fig)
     print(f"  [fig] {FIG / 'task5c_gp_ntrain.png'}")
 

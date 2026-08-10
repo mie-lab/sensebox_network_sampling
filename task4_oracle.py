@@ -213,7 +213,7 @@ def build_oracle(inventory, traversals, events):
 def _save(fig, name):
     FIG_DIR.mkdir(parents=True, exist_ok=True)
     p = FIG_DIR / name
-    fig.savefig(p, dpi=220, bbox_inches="tight")
+    fig.savefig(p, dpi=150, bbox_inches="tight")
     plt.close(fig)
     print(f"[fig] saved -> {p}")
 

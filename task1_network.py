@@ -289,7 +289,7 @@ def inspect_classification(edges, column="edge_class", out_dir=INSPECT_DIR):
         ax.set_axis_off()
     for ax in axes.flat[len(cats):]:
         ax.set_visible(False)
-    fig.savefig(out_dir / "task1_labels_small_multiples.png", dpi=200, bbox_inches="tight")
+    fig.savefig(out_dir / "task1_labels_small_multiples.png", dpi=150, bbox_inches="tight")
     plt.close(fig)
 
 
@@ -306,7 +306,7 @@ def plot_network(edges, column="edge_class", path=PLOT_PATH):
     ax.set_axis_off()
     ax.legend(loc="lower left", fontsize=8)
     path.parent.mkdir(exist_ok=True)
-    fig.savefig(path, dpi=200, bbox_inches="tight")
+    fig.savefig(path, dpi=150, bbox_inches="tight")
     plt.close(fig)
     return path
 

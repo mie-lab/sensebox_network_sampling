@@ -292,7 +292,7 @@ def fig_uncertainty(streets, eb):
     ax.set_title("Per-edge rate uncertainty")
     ax.spines[["top", "right"]].set_visible(False)
     fig.tight_layout()
-    fig.savefig(FIG / "task5b_eb_uncertainty.png", dpi=200, bbox_inches="tight")
+    fig.savefig(FIG / "task5b_eb_uncertainty.png", dpi=150, bbox_inches="tight")
     plt.close(fig)
     print(f"  [fig] {FIG / 'task5b_eb_uncertainty.png'}")
 
@@ -329,7 +329,7 @@ def fig_shrinkage(streets, eb, prior):
               fontsize=8, frameon=False)
     ax.spines[["top", "right"]].set_visible(False)
     fig.tight_layout()
-    fig.savefig(FIG / "task5b_eb_shrinkage.png", dpi=200, bbox_inches="tight")
+    fig.savefig(FIG / "task5b_eb_shrinkage.png", dpi=150, bbox_inches="tight")
     plt.close(fig)
     print(f"  [fig] {FIG / 'task5b_eb_shrinkage.png'}")
 
@@ -367,7 +367,7 @@ def fig_regime_caterpillar(prior):
                 transform=ax.transAxes, ha="right", va="bottom", fontsize=7.5, color="0.5")
     ax.spines[["top", "right"]].set_visible(False)
     fig.tight_layout()
-    fig.savefig(FIG / "task5b_regime_caterpillar.png", dpi=200, bbox_inches="tight")
+    fig.savefig(FIG / "task5b_regime_caterpillar.png", dpi=150, bbox_inches="tight")
     plt.close(fig)
     print(f"  [fig] {FIG / 'task5b_regime_caterpillar.png'}")
 

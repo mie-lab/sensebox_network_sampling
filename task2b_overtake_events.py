@@ -138,7 +138,7 @@ def summarise(gdf, events, min_length_km=MIN_LENGTH_KM):
 def _save(fig, name):
     FIG_DIR.mkdir(parents=True, exist_ok=True)
     p = FIG_DIR / name
-    fig.savefig(p, dpi=220, bbox_inches="tight")
+    fig.savefig(p, dpi=150, bbox_inches="tight")
     plt.close(fig)
     print(f"[fig] saved -> {p}")
 
@@ -252,7 +252,7 @@ def plot_trajectories(gdf, color_by=BOX_ID_COL, path=PLOT_PATH, max_legend=MAX_L
     extra = len(cats) - min(len(cats), max_legend)
     ax.legend(loc="center left", bbox_to_anchor=(1.0, 0.5), fontsize=7,
               title=color_by + (f"  (+{extra} more)" if extra > 0 else ""), frameon=False)
-    fig.savefig(path, dpi=200, bbox_inches="tight")
+    fig.savefig(path, dpi=150, bbox_inches="tight")
     plt.close(fig)
     print(f"[plot] saved -> {path}")
 

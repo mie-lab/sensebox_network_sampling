@@ -355,7 +355,7 @@ def fig_coverage_map(matched_points, matched_events):
 
     FIG_DIR.mkdir(parents=True, exist_ok=True)
     p = FIG_DIR / "task3_coverage_map.png"
-    fig.savefig(p, dpi=220, bbox_inches="tight")
+    fig.savefig(p, dpi=150, bbox_inches="tight")
     plt.close(fig)
     print(f"[fig] saved -> {p}")
 

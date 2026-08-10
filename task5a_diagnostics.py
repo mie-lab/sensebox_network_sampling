@@ -46,7 +46,7 @@ def _setup():
 
 def _save(fig, name):
     p = FIG / name
-    fig.savefig(p, dpi=200, bbox_inches="tight")
+    fig.savefig(p, dpi=150, bbox_inches="tight")
     plt.close(fig)
     print(f"  [fig]  {p}")
 
