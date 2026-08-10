@@ -1,39 +1,47 @@
 """Extract overtake events from the quality-checked rides.
 
-Reads the segmented points and the keep verdict written by diagnostics_task2.py
+Reads the segmented points and the keep verdict written by task2a_ride_quality.py
 (run that first), keeps only approved rides, and collapses bursts of high
 "Overtaking Manoeuvre" probability (man_p >= MAN_P_TAU, gaps <= MERGE_GAP_S
 merged) into one event per car pass.
 
-Each event carries first/last/anchor point ids so mapmatching_task3.py can pin it onto a matched edge;
+Each event carries first/last/anchor point ids so task3_mapmatching.py can pin it onto a matched edge;
 the anchor is the highest-probability point (best guess for the moment the car was alongside).
 
 Writes to output/task2_trajectories/:
-  trajectory_points_task2.gpkg   points of the kept rides (input to map-matching)
-  overtake_events_task2.gpkg     one row per overtake event
-  trajectory_summary_task2.csv   one row per ride
+  task2b_trajectory_points.gpkg   points of the kept rides (input to map-matching)
+  task2b_overtake_events.gpkg     one row per overtake event
+  task2b_trajectory_summary.csv   one row per ride
+and the two slide figures for this stage to output/figures/.
 """
 from pathlib import Path
 
 import geopandas as gpd
+import matplotlib.dates as mdates
 import numpy as np
 import pandas as pd
 from matplotlib import pyplot as plt
 from shapely.geometry import LineString
 
-from diagnostics_task2 import BOX_ID_COL, MAN_P_TAU, QUALITY_CSV, SEG_POINTS_PATH
+from task2a_ride_quality import BOX_ID_COL, MAN_P_TAU, QUALITY_CSV, SEG_POINTS_PATH
 
 OUT_DIR = Path("output/task2_trajectories")
-POINTS_PATH = OUT_DIR / "trajectory_points_task2.gpkg"
-EVENTS_PATH = OUT_DIR / "overtake_events_task2.gpkg"
-SUMMARY_PATH = OUT_DIR / "trajectory_summary_task2.csv"
-PLOT_PATH = OUT_DIR / "trajectories_task2.png"
+FIG_DIR = Path("output/figures")
+POINTS_PATH = OUT_DIR / "task2b_trajectory_points.gpkg"
+EVENTS_PATH = OUT_DIR / "task2b_overtake_events.gpkg"
+SUMMARY_PATH = OUT_DIR / "task2b_trajectory_summary.csv"
+PLOT_PATH = OUT_DIR / "task2b_trajectories.png"
 
 CLOSE_PASS_CM = 150                  # ordinal descriptor threshold; NOT meters-true clearance
 MERGE_GAP_S = 5                      # gap below which two bursts are one event
                                      # (the app max-pools man_p over 2 s, which can split one pass)
 MIN_LENGTH_KM = 0.2
 MAX_LEGEND = 15
+
+INK, MUTED = "#0b0b0b", "#52514e"
+RIDE, EVENT = "#2a78d6", "#e34948"
+plt.rcParams.update({"font.size": 12, "text.color": INK,
+                     "figure.facecolor": "white", "savefig.facecolor": "white"})
 
 
 def load_kept_points(points_path=SEG_POINTS_PATH, quality_csv=QUALITY_CSV):
@@ -127,6 +135,99 @@ def summarise(gdf, events, min_length_km=MIN_LENGTH_KM):
     return summary.sort_values("overtake_rate_per_km", ascending=False)
 
 
+def _save(fig, name):
+    FIG_DIR.mkdir(parents=True, exist_ok=True)
+    p = FIG_DIR / name
+    fig.savefig(p, dpi=220, bbox_inches="tight")
+    plt.close(fig)
+    print(f"[fig] saved -> {p}")
+
+
+def fig_box_activity(summary):
+    """One row per box: a faint lifespan bar (first→last ride) with a tick per ride.
+    Sorted by first activity, so boxes appearing over time form a staircase."""
+    s = summary.copy()
+    s["start_num"] = mdates.date2num(s["start"])
+    first = s.groupby("boxName")["start_num"].min()
+    last = s.groupby("boxName")["start_num"].max()
+    order = first.sort_values(ascending=False).index
+    ypos = {name: i for i, name in enumerate(order)}
+
+    fig, ax = plt.subplots(figsize=(11, 9))
+    ax.set_facecolor("white")
+    for name in order:
+        y = ypos[name]
+        ax.plot([first[name], last[name]], [y, y], color="0.86", lw=3,
+                solid_capstyle="round", zorder=1)
+    ax.scatter(s["start_num"], [ypos[n] for n in s["boxName"]],
+               s=12, color=RIDE, alpha=0.8, marker="|", linewidths=1.1, zorder=2)
+
+    ax.set_yticks(range(len(order)))
+    ax.set_yticklabels([n[:22] for n in order], fontsize=7)
+    ax.set_ylim(-1, len(order))
+    ax.set_xlim(s["start_num"].min() - 15, s["start_num"].max() + 15)
+    ax.xaxis.set_major_locator(mdates.MonthLocator(interval=3))
+    ax.xaxis.set_major_formatter(mdates.DateFormatter("%b %Y"))
+    ax.xaxis.set_minor_locator(mdates.MonthLocator(interval=1))
+    ax.tick_params(axis="x", which="minor", length=0)
+    ax.tick_params(axis="x", which="major", labelsize=10, colors=MUTED)
+    for side in ("top", "right", "left"):
+        ax.spines[side].set_visible(False)
+    ax.spines["bottom"].set_color(MUTED)
+    ax.tick_params(axis="y", length=0)
+    ax.set_title(f"When each senseBox was active  ({s['boxName'].nunique()} boxes, "
+                 f"{len(s)} rides)\nCollection is episodic — most boxes ride briefly, "
+                 "a few carry the dataset",
+                 loc="left", fontsize=14, pad=12)
+    _save(fig, "task2b_box_activity.png")
+
+
+def fig_overtake_extraction(pts, traj_id="67226da749d0900007ca343c_40",
+                            win_start_s=60, win_end_s=210):
+    """One ride's classifier confidence over time; gated bursts become events —
+    the picture of what extract_overtake_events() does."""
+    t = pts[pts["traj_id"] == traj_id].sort_values("createdAt").copy()
+    if t.empty:
+        print(f"[fig] skipped task2b_overtake_extraction: traj_id {traj_id} not in the kept rides")
+        return
+    t0 = t["createdAt"].min()
+    t["s"] = (t["createdAt"] - t0).dt.total_seconds()
+    w = t[(t["s"] >= win_start_s) & (t["s"] <= win_end_s)]
+
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(11, 5.2), sharex=True,
+                                   gridspec_kw={"height_ratios": [2, 1], "hspace": 0.12})
+    # shade gated bursts (man_p >= tau), merged if <= MERGE_GAP_S apart
+    gated = w[w["man_p"] >= MAN_P_TAU]
+    if len(gated):
+        brk = gated["s"].diff().gt(MERGE_GAP_S).cumsum()
+        for _, g in gated.groupby(brk):
+            for ax in (ax1, ax2):
+                ax.axvspan(g["s"].min() - 0.5, g["s"].max() + 0.5,
+                           color=EVENT, alpha=0.13, zorder=0)
+
+    ax1.plot(w["s"], w["man_p"], color=RIDE, lw=1.6)
+    ax1.axhline(MAN_P_TAU, color=MUTED, ls="--", lw=1)
+    ax1.text(w["s"].min(), MAN_P_TAU + 0.03, f"gate  τ = {MAN_P_TAU}",
+             color=MUTED, fontsize=10)
+    ax1.set_ylabel("classifier\nconfidence")
+    ax1.set_ylim(-0.03, 1.03)
+
+    ax2.plot(w["s"], w["value"].where(w["value"] > 0), color="0.55", lw=1.2)
+    ax2.set_ylabel("distance\n(cm)")
+    ax2.set_xlabel("seconds into ride")
+
+    n_ev = 0 if not len(gated) else (gated["s"].diff().gt(MERGE_GAP_S).sum() + 1)
+    for ax in (ax1, ax2):
+        for side in ("top", "right"):
+            ax.spines[side].set_visible(False)
+        ax.tick_params(length=0)
+    ax1.set_title("From sensor stream to overtake events\n"
+                  f"red bands = seconds the classifier flags a passing car → "
+                  f"{int(n_ev)} events in this 2.5-min window",
+                  loc="left", fontsize=14, pad=10)
+    _save(fig, "task2b_overtake_extraction.png")
+
+
 def plot_trajectories(gdf, color_by=BOX_ID_COL, path=PLOT_PATH, max_legend=MAX_LEGEND):
     records = []
     for traj_id, t in gdf.groupby("traj_id"):
@@ -156,7 +257,7 @@ def plot_trajectories(gdf, color_by=BOX_ID_COL, path=PLOT_PATH, max_legend=MAX_L
     print(f"[plot] saved -> {path}")
 
 
-if __name__ == "__main__":
+def main():
     pts = load_kept_points()
     events = extract_overtake_events(pts)
     summ = summarise(pts, events)
@@ -172,7 +273,13 @@ if __name__ == "__main__":
     events.to_file(EVENTS_PATH, driver="GPKG")
     summ.to_csv(SUMMARY_PATH)
     print(f"saved: {POINTS_PATH.name}, {EVENTS_PATH.name}, {SUMMARY_PATH.name}")
-    try:
+    try:                                        # plots must never block the data outputs
         plot_trajectories(pts)
-    except Exception as e:                      # plots must never block the data outputs
-        print(f"[plot] FAILED ({e}) -> data outputs are saved, only the figure is missing")
+        fig_box_activity(summ)
+        fig_overtake_extraction(pts)
+    except Exception as e:
+        print(f"[plot] FAILED ({e}) -> data outputs are saved, only the figures are missing")
+
+
+if __name__ == "__main__":
+    main()

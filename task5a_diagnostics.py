@@ -1,17 +1,19 @@
 """Task 5 diagnostics — the evidence behind the model choices.
 
+Every function here answers "why is the estimator built this way?", not "what is in the
+data" — the descriptive side lives in task4_oracle.py, next to the tables it describes.
+
+  exposure_unit_choice()     why rider-hours and not traversals or rider-km
   rider_dominance()          a few boxes drive the estimate -> clustered CI (~6x wider)
   regime_dispersion()        overdispersion per street type (the sampling-budget knob)
   temporal_drift()           does each regime's rate drift between years? (clustered RR)
   poisson_vs_nb()            does the negative binomial beat Poisson? (AIC)
   covariate_adjustment()     covariate effects, marginal vs regime-adjusted
   covariate_correlation()    do static covariates predict the rate? (heatmap)
-  intersection_robustness()  is the regime ranking a junction artifact?
   moran_by_threshold()       residual spatial autocorrelation vs. exposure threshold
-  forest_support_table()     the numbers behind the Task-4 forest plot + a support flag
 
 Tables -> output/task5_diagnostics/ ,  figures -> output/figures/.
-Run from an activated env:   python diagnostics_task5.py
+Run from an activated env:   python task5a_diagnostics.py
 """
 import sys
 from itertools import combinations
@@ -25,11 +27,9 @@ if hasattr(sys.stdout, "reconfigure"):   # keep unicode tables from crashing a c
     sys.stdout.reconfigure(encoding="utf-8")
 
 BASE = Path(".")
-ORACLE = BASE / "output/task4_oracle/edge_oracle_task4.csv"
-TRAV = BASE / "output/task4_oracle/edge_traversals_task4.csv"
-EVENTS = BASE / "output/task4_oracle/edge_events_task4.csv"
-MATCHED_EVENTS = BASE / "output/task3_matching/matched_events_task3.gpkg"
-GRAPHML = BASE / "input/muenster_bike.graphml"
+ORACLE = BASE / "output/task4_oracle/task4_edge_oracle.csv"
+TRAV = BASE / "output/task4_oracle/task4_edge_traversals.csv"
+EVENTS = BASE / "output/task4_oracle/task4_edge_events.csv"
 OUT = BASE / "output/task5_diagnostics"
 FIG = BASE / "output/figures"
 
@@ -74,7 +74,7 @@ def _regime_drift(ev, tr, min_events=10):
     ev, tr must already carry a 'win' column and edge_class/boxId/rider_km."""
     import statsmodels.api as sm
 
-    km = tr.groupby(["edge_class", "win", "boxId"], observed=True)["rider_km"].sum()
+    km = tr.groupby(["edge_class", "win", "boxId"], observed=True)["rider_h"].sum()
     n = ev.groupby(["edge_class", "win", "boxId"], observed=True).size()
     cell = pd.concat([km.rename("km"), n.rename("n")], axis=1).reset_index()
     cell["km"] = cell["km"].fillna(0.0)
@@ -115,7 +115,7 @@ def temporal_drift(n_windows=2, min_events=10):
         ev = ev.merge(cls, on=["u", "v"], how="left")
     ev["time"] = pd.to_datetime(ev["time"], utc=True, format="mixed")
     tr["enter_time"] = pd.to_datetime(tr["enter_time"], utc=True, format="mixed")
-    tr["rider_km"] = tr["length_m"] / 1000.0
+    tr["rider_h"] = tr["on_edge_s"] / 3600.0
     t0, t1 = tr["enter_time"].min(), tr["enter_time"].max()
     bins = [t0 + (t1 - t0) * f for f in np.linspace(0, 1, n_windows + 1)]
     bins[0] -= pd.Timedelta(seconds=1)
@@ -127,7 +127,7 @@ def temporal_drift(n_windows=2, min_events=10):
     ev_tot = ev.groupby("edge_class").size()
     drift["events"] = drift["regime"].map(ev_tot).fillna(0).astype(int)
     drift = drift.sort_values("events", ascending=False)
-    _write(drift.round(3), "temporal_drift.csv")
+    _write(drift.round(3), "task5a_temporal_drift.csv")
 
     d = drift.dropna(subset=["rr"])
     fig, ax = plt.subplots(figsize=(8.4, 0.5 * len(d) + 1.6))
@@ -148,16 +148,16 @@ def temporal_drift(n_windows=2, min_events=10):
     ax.set_xlabel("window-2 ÷ window-1 overtake-rate ratio  (95% rider-clustered CI)")
     ax.plot([], [], "o", color=ACC2, label="drift detected (CI excludes 1)")
     ax.plot([], [], "o", color=MUTED, label="no drift detected")
-    ax.legend(loc="lower right", fontsize=8.5, frameon=False)
+    # above the axes: the widest CI (thin regimes) runs to the far right of the bottom rows
+    ax.legend(loc="lower left", bbox_to_anchor=(0, 1.0), ncol=2, fontsize=8.5, frameon=False)
     n_drift = int(d["drift"].sum())
-    ax.set_title("Drift is only resolvable where riders are many "
-                 f"({n_drift}/{len(d)} regimes)\n"
-                 "point estimates mostly rise, but the thin late window can't confirm it "
-                 "— temporal coverage is starved",
-                 fontsize=11.5, loc="left")
+    ax.set_title(f"Rates are not stable across the two years ({n_drift}/{len(d)} regimes drift)\n"
+                 "the two best-measured road regimes both rose ~70% — but which riders were "
+                 "active also changed between windows",
+                 fontsize=11.5, loc="left", pad=26)
     for s in ("top", "right"):
         ax.spines[s].set_visible(False)
-    _save(fig, "fig_temporal_drift.png")
+    _save(fig, "task5a_temporal_drift.png")
     print(drift.to_string(index=False))
     return drift
 
@@ -206,7 +206,7 @@ def rider_dominance(n_boot=3000):
         dict(metric="CI width inflation (clustered/naive)",
              value=round((chi - clo) / (nhi - nlo), 2)),
     ])
-    _write(summary, "rider_dominance.csv")
+    _write(summary, "task5a_rider_dominance.csv")
 
     fig, ax = plt.subplots(figsize=(8.5, 2.6))
     ax.errorbar(rate, 1, xerr=[[rate - nlo], [nhi - rate]], fmt="o", color=MUTED,
@@ -225,7 +225,7 @@ def rider_dominance(n_boot=3000):
                  fontsize=11.5, loc="left")
     for s in ("top", "right"):
         ax.spines[s].set_visible(False)
-    _save(fig, "fig_rider_dominance.png")
+    _save(fig, "task5a_rider_dominance.png")
     print(summary.to_string(index=False))
     return summary
 
@@ -268,7 +268,7 @@ def poisson_vs_nb():
         dict(model="NB dispersion α", loglik="", k="", AIC=round(best_a, 3)),
         dict(model="Poisson Pearson dispersion", loglik="", k="", AIC=round(pearson_disp, 2)),
     ])
-    _write(df, "poisson_vs_nb.csv")
+    _write(df, "task5a_poisson_vs_nb.csv")
     print(df.to_string(index=False))
     return df
 
@@ -310,7 +310,7 @@ def covariate_adjustment():
         rows.append(dict(covariate=lab, rr_marginal=rm, lo_m=lm, hi_m=hm,
                          rr_adjusted=ra, lo_a=la, hi_a=ha, p_adjusted=pa))
     df = pd.DataFrame(rows)
-    _write(df.round(3), "covariate_adjustment.csv")
+    _write(df.round(3), "task5a_covariate_adjustment.csv")
     print(df.to_string(index=False))
 
     fig, ax = plt.subplots(figsize=(8.8, 0.9 * len(df) + 1.8))
@@ -341,11 +341,24 @@ def covariate_adjustment():
                  fontsize=11.5, loc="left")
     for s in ("top", "right"):
         ax.spines[s].set_visible(False)
-    _save(fig, "fig_covariate_adjusted.png")
+    _save(fig, "task5a_covariate_adjusted.png")
     return df
 
 
 # ---------------------------------------------------------------------------
+def _eta2_ranks(x, groups):
+    """Share of x's RANK variance explained by a categorical grouping (eta-squared on
+    ranks) — the categorical analogue of Spearman, on the same 0..1 scale."""
+    from scipy.stats import rankdata
+    m = x.notna()
+    if m.sum() < 2:
+        return np.nan
+    r = pd.Series(rankdata(x[m]), index=x[m].index)
+    gm = r.mean()
+    ssb = sum(len(v) * (v.mean() - gm) ** 2 for _, v in r.groupby(groups[m]))
+    return float(ssb / ((r - gm) ** 2).sum())
+
+
 def covariate_correlation(min_trav=3):
     """Spearman correlation heatmap: the per-edge overtake rate against the static
     covariates, on well-observed edges (>= min_trav traversals, to tame the rate
@@ -353,192 +366,130 @@ def covariate_correlation(min_trav=3):
     and the covariates are collinear with each other, so none is a clean predictor.
     Accidents are the external (injury-record) signal to eyeball for convergent
     validity; AADT is included but only 3% of edges carry it."""
-    o = pd.read_csv(ORACLE)
-    d = o[(o["is_observed"]) & (o["n_traversals"] >= min_trav) & (o["rider_km"] > 0)].copy()
-    d["overtake_rate"] = d["n_events"] / d["rider_km"]
-    names = {"overtake_rate": "overtake rate", "n_acc_bike": "bike accidents",
-             "maxspeed_kmh": "speed limit", "betweenness": "betweenness",
-             "aadt_kfz": "AADT (3% cov)", "lanes_n": "car lanes",
-             "length_m": "edge length", "n_traversals": "traversals"}
-    names = {k: v for k, v in names.items() if k in d.columns}
-    corr = d[list(names)].rename(columns=names).corr(method="spearman")
-    _write(corr.round(2).reset_index(names="var"), "covariate_correlation.csv")
+    import seaborn as sns
 
-    fig, ax = plt.subplots(figsize=(7.8, 6.6))
-    im = ax.imshow(corr.values, cmap="RdBu_r", vmin=-1, vmax=1)
-    ax.set_xticks(range(len(corr)))
-    ax.set_xticklabels(corr.columns, rotation=45, ha="right", fontsize=9)
-    ax.set_yticks(range(len(corr)))
-    ax.set_yticklabels(corr.index, fontsize=9)
-    for i in range(len(corr)):
-        for j in range(len(corr)):
-            v = corr.values[i, j]
-            ax.text(j, i, f"{v:.2f}", ha="center", va="center", fontsize=8,
-                    color="white" if abs(v) > 0.55 else INK)
-    cb = fig.colorbar(im, fraction=0.046, pad=0.04)
-    cb.set_label("Spearman ρ")
-    ax.set_title(f"Static covariates vs the overtake rate  (edges with ≥ {min_trav} traversals, "
-                 f"n={len(d)})\nrate ties weakly to everything; covariates are collinear "
-                 "→ none is a clean predictor",
-                 fontsize=10.5, loc="left")
-    _save(fig, "fig_covariate_correlation.png")
-    print(corr.to_string())
+    o = pd.read_csv(ORACLE)
+    d = o[(o["is_observed"]) & (o["n_traversals"] >= min_trav) & (o["rider_h"] > 0)].copy()
+    d["overtake_rate"] = d["n_events"] / d["rider_h"]          # the modelled estimand
+    d["speed_kmh"] = d["rider_km"] / d["rider_h"]
+    names = {"overtake_rate": "overtake rate", "n_traversals": "traversals",
+             "rider_km": "rider-km", "rider_h": "rider-hours", "speed_kmh": "rider speed",
+             "length_m": "edge length", "n_acc_bike": "bike accidents",
+             "maxspeed_kmh": "speed limit", "betweenness": "betweenness",
+             "lanes_n": "car lanes", "aadt_kfz": "AADT"}
+    names = {k: v for k, v in names.items() if k in d.columns}
+    sub = d[list(names)].rename(columns=names)
+    corr = sub.corr(method="spearman")        # pairwise-complete: each cell drops its own NaNs
+
+    # street regime is categorical, so its association is eta^2 (share of RANK variance it
+    # explains) rather than a correlation — appended as the last row/col, same 0..1 direction
+    eta = {c: _eta2_ranks(sub[c], d["edge_class"]) for c in sub.columns}
+    corr.loc["street regime η²"] = pd.Series(eta)
+    corr["street regime η²"] = pd.Series({**eta, "street regime η²": 1.0})
+    _write(corr.round(3).reset_index(names="var"), "task5a_covariate_correlation.csv")
+
+    # lower triangle only, minus the all-masked first row and last column
+    mask = np.triu(np.ones_like(corr, dtype=bool))
+    corr_t, mask_t = corr.iloc[1:, :-1], mask[1:, :-1]
+    thin = [c for c in sub.columns if sub[c].notna().mean() < 0.5]   # sparse covariates
+    fig, ax = plt.subplots(figsize=(8.6, 6.4))
+    sns.heatmap(corr_t, mask=mask_t, cmap="RdBu_r", vmin=-1, vmax=1, center=0, annot=True,
+                fmt=".2f", annot_kws={"size": 8}, linewidths=0.6, linecolor="white",
+                square=True, cbar_kws={"shrink": 0.55, "label": "Spearman ρ"}, ax=ax)
+    ax.set_title(f"What the overtake rate ties to   (n={len(d):,} edges, ≥{min_trav} traversals)",
+                 fontsize=12, loc="left")
+    note = "cells are Spearman ρ; bottom row is η² (rank variance explained by regime)"
+    if thin:
+        note += "\nsparse: " + ", ".join(f"{c} on {sub[c].notna().mean():.0%} of edges" for c in thin)
+    ax.text(0, -0.9, note, fontsize=8, color=MUTED)
+    ax.tick_params(axis="x", rotation=45, labelsize=9)
+    ax.tick_params(axis="y", rotation=0, labelsize=9)
+    for lab in ax.get_xticklabels():
+        lab.set_ha("right")
+    _save(fig, "task5a_covariate_correlation.png")
+    print(corr.round(2).to_string())
+    print("\n  pairwise coverage (share of the subset with a value):")
+    print("   " + " | ".join(f"{c} {sub[c].notna().mean():.0%}" for c in sub.columns))
     return corr
 
 
 # ---------------------------------------------------------------------------
-def intersection_robustness(buffer_m=15):
-    """Is the regime ranking an intersection artifact? Overtakes are modelled as an
-    edge property, yet many sit near junctions (turning/queuing cars, and matching
-    is least sure there). Refit each regime's rate with events near a REAL road
-    junction removed, and check the ranking holds.
-
-    A 'real junction' is a node of degree >= 3 in the MOTOR-road subgraph — this
-    drops the many degree-3 cycleway/path connectors that inflate the naive count."""
-    import geopandas as gpd
-    import osmnx as ox
-    from collections import Counter
-    from scipy.spatial import cKDTree
-    from scipy.stats import spearmanr
-
-    MOTOR = {"primary", "primary_link", "secondary", "secondary_link", "tertiary",
-             "tertiary_link", "trunk", "trunk_link", "unclassified", "residential",
-             "living_street"}                       # service excluded: low cross-traffic
-
-    def hw1(d):
-        h = d.get("highway")
-        return h[0] if isinstance(h, list) else h
-
-    G = ox.load_graphml(GRAPHML)
-    deg = Counter()
-    for u, v, d in ox.convert.to_undirected(G).edges(data=True):
-        if hw1(d) in MOTOR:
-            deg[u] += 1
-            deg[v] += 1
-    nodes = ox.graph_to_gdfs(G, edges=False).to_crs(25832)
-    real = nodes[[deg.get(n, 0) >= 3 for n in nodes.index]]
-
-    ev = gpd.read_file(MATCHED_EVENTS).to_crs(25832)
-    ev = ev[ev["edge_class"].notna()].copy()
-    tree = cKDTree(np.c_[real.geometry.x, real.geometry.y])
-    dist, _ = tree.query(np.c_[ev.geometry.x, ev.geometry.y])
-    ev["near"] = dist <= buffer_m
-
-    obs = pd.read_csv(ORACLE)
-    obs = obs[obs["is_observed"]]
-    km = obs.groupby("edge_class")["rider_km"].sum()
-    reg = pd.DataFrame({"km": km,
-                        "n_all": ev.groupby("edge_class").size(),
-                        "n_mid": ev[~ev["near"]].groupby("edge_class").size()})
-    reg = reg.dropna(subset=["km"]).fillna({"n_all": 0, "n_mid": 0})
-    reg = reg[reg["n_all"] >= 20].copy()
-    reg["share_near"] = 1 - reg["n_mid"] / reg["n_all"]
-    reg["rate_all"] = reg["n_all"] / reg["km"]
-    reg["rate_mid"] = reg["n_mid"] / reg["km"]
-    ov_all = reg["n_all"].sum() / reg["km"].sum()
-    ov_mid = reg["n_mid"].sum() / reg["km"].sum()
-    reg["rel_all"] = reg["rate_all"] / ov_all
-    reg["rel_mid"] = reg["rate_mid"] / ov_mid
-    rho = float(spearmanr(reg["rel_all"], reg["rel_mid"]).statistic)
-    reg = reg.sort_values("rate_all", ascending=False).reset_index()
-    _write(reg.round(3), "intersection_robustness.csv")
-
-    overall = float(ev["near"].mean())
-    print(f"  real motor-junction nodes: {len(real)}  |  events near (<= {buffer_m} m): {overall:.0%}")
-    print(f"  regime relative-rate rank stability (Spearman, full vs mid-edge): rho = {rho:.2f}")
-    print(reg[["edge_class", "n_all", "share_near", "rel_all", "rel_mid"]].to_string(index=False))
-
-    verdict = "barely moves" if rho >= 0.9 else ("mostly holds" if rho >= 0.7 else "shifts")
-    fig, ax = plt.subplots(figsize=(6.8, 6.4))
-    lim = max(reg["rel_all"].max(), reg["rel_mid"].max()) * 1.1
-    ax.plot([0, lim], [0, lim], color=MUTED, ls="--", lw=1, label="unchanged")
-    ax.scatter(reg["rel_all"], reg["rel_mid"], s=45, color=ACC, zorder=3)
-    for r in reg.itertuples():
-        ax.annotate(r.edge_class.replace("_", " "), (r.rel_all, r.rel_mid), (5, 3),
-                    textcoords="offset points", fontsize=8, color=INK)
-    ax.set_xlim(0, lim)
-    ax.set_ylim(0, lim)
-    ax.set_xlabel("relative overtake rate — all events")
-    ax.set_ylabel(f"relative rate — events within {buffer_m} m of a junction removed")
-    ax.legend(loc="lower right", fontsize=9, frameon=False)
-    ax.set_title(f"Regime ranking {verdict} when near-junction overtakes are dropped\n"
-                 f"{overall:.0%} of events sit near a real road junction · rank ρ = {rho:.2f}",
-                 fontsize=11.5, loc="left")
-    for s in ("top", "right"):
-        ax.spines[s].set_visible(False)
-    _save(fig, "fig_intersection_robustness.png")
-    return reg
-
 
 # ---------------------------------------------------------------------------
-def _moran(sub, col):
+def _moran(sub, col, n_perm=999):
+    """Moran's I using binary edge adjacency (two streets share an endpoint node)."""
     sub = sub.reset_index(drop=True)
-    node2e = {}
-    for i, (a, b) in enumerate(zip(sub["u_lo"], sub["v_hi"])):
-        node2e.setdefault(a, []).append(i)
-        node2e.setdefault(b, []).append(i)
+
+    node2edges = {}
+    for i, (u, v) in enumerate(zip(sub["u_lo"], sub["v_hi"])):
+        node2edges.setdefault(u, []).append(i)
+        node2edges.setdefault(v, []).append(i)
+
     pairs = set()
-    for edges in node2e.values():
+    for edges in node2edges.values():
         if len(edges) > 1:
             for i, j in combinations(edges, 2):
-                pairs.add((i, j) if i < j else (j, i))
+                pairs.add((min(i, j), max(i, j)))
     if not pairs:
         return None
-    I_idx = np.fromiter((p[0] for p in pairs), int)
-    J_idx = np.fromiter((p[1] for p in pairs), int)
-    z = sub[col].to_numpy(float) - sub[col].mean()
-    N, P = len(z), len(pairs)
-    denom = (z ** 2).sum()
-    I = (N / P) * (z[I_idx] * z[J_idx]).sum() / denom
-    perm = np.array([(N / P) * (zp[I_idx] * zp[J_idx]).sum() / denom
-                     for zp in (RNG.permutation(z) for _ in range(999))])
-    p = (np.sum(np.abs(perm) >= abs(I)) + 1) / 1000
-    return N, P, I, p
+
+    I_idx = np.fromiter((i for i, _ in pairs), dtype=int)
+    J_idx = np.fromiter((j for _, j in pairs), dtype=int)
+
+    z = sub[col].to_numpy(float)
+    z = z - z.mean()
+    denom = np.dot(z, z)
+    if denom == 0:                      # all residuals identical -> I undefined
+        return None
+
+    n, w = len(z), len(pairs)
+    I = (n / w) * np.sum(z[I_idx] * z[J_idx]) / denom
+
+    perm = np.empty(n_perm)
+    for k in range(n_perm):
+        zp = RNG.permutation(z)
+        perm[k] = (n / w) * np.sum(zp[I_idx] * zp[J_idx]) / denom
+    p = (np.sum(np.abs(perm) >= abs(I)) + 1) / (n_perm + 1)
+
+    return {"streets": n, "pairs": w, "mean_neighbors": 2 * w / n,
+            "morans_I": I, "perm_p": p}
 
 
 def moran_by_threshold(thresholds=(1, 2, 4, 6, 8, 10)):
-    """Moran's I of the residual rate (rate - regime mean) on undirected
-    streets, at rising exposure thresholds; the signal emerges as the
-    per-edge rate gets less noisy."""
+    """Moran's I of street-type Pearson residuals as observation coverage increases.
+
+    Streets are aggregated to UNDIRECTED edges (pooling directions — otherwise the two
+    directions of one street, sharing both endpoints, count as each other's neighbour).
+    Expected counts mu = regime_rate(edge_class) x rider_h; the Pearson residual
+    (N - mu)/sqrt(mu) is what is tested. The raw rate difference is NOT used: it is
+    dominated by low-exposure streets (one overtake in a few seconds = thousands/hour).
+
+    Read the headline value at the well-observed end. The rise across thresholds is a
+    consistency check, not a finding: sparse streets are noise-dominated and noise is
+    spatially independent, so I is attenuated toward 0 there by construction. Rows are
+    also nested, so they are not independent samples."""
     o = pd.read_csv(ORACLE)
     g = (o.groupby(["u_lo", "v_hi"])
-         .agg(n_events=("n_events", "sum"), rider_km=("rider_km", "sum"),
+         .agg(n_events=("n_events", "sum"), rider_h=("rider_h", "sum"),
               n_trav=("n_traversals", "sum"), edge_class=("edge_class", "first"))
          .reset_index())
-    g = g[g["rider_km"] > 0].copy()
-    g["rate"] = g["n_events"] / g["rider_km"]
+    g = g[g["rider_h"] > 0].copy()
     reg = g.groupby("edge_class").apply(
-        lambda d: d["n_events"].sum() / d["rider_km"].sum(), include_groups=False).to_dict()
-    g["resid"] = g["rate"] - g["edge_class"].map(reg)
+        lambda d: d["n_events"].sum() / d["rider_h"].sum(), include_groups=False).to_dict()
+    mu = (g["edge_class"].map(reg) * g["rider_h"]).clip(lower=1e-9)
+    g["pearson"] = (g["n_events"] - mu) / np.sqrt(mu)
 
     rows = []
     for t in thresholds:
-        sub = g[g["n_trav"] >= t]
-        r = _moran(sub, "resid")
-        if r:
-            rows.append(dict(min_traversals=t, streets=r[0], pairs=r[1],
-                             morans_I=round(r[2], 4), perm_p=round(r[3], 3)))
-    df = pd.DataFrame(rows)
-    _write(df, "moran_threshold.csv")
+        res = _moran(g[g["n_trav"] >= t], "pearson")
+        if res is None:
+            continue
+        rows.append({"min_traversals": t,
+                     **{k: round(v, 3) if isinstance(v, float) else v
+                        for k, v in res.items()}})
 
-    fig, ax = plt.subplots(figsize=(7.5, 4.6))
-    ax.axhline(0, color=MUTED, lw=1, ls="--")
-    ax.plot(df["min_traversals"], df["morans_I"], "-o", color=ACC2, ms=9, lw=2)
-    for _, r in df.iterrows():
-        star = " *" if r["perm_p"] < 0.05 else ""
-        ax.annotate(f"I={r['morans_I']:.2f}{star}\nn={int(r['streets'])}",
-                    (r["min_traversals"], r["morans_I"]), textcoords="offset points",
-                    xytext=(8, -4), fontsize=9, color=INK)
-    ax.set_xlabel("streets kept  (minimum traversals)")
-    ax.set_ylabel("Moran's I  (residual rate)")
-    ax.set_xticks(list(thresholds))
-    ax.set_ylim(-0.02, max(df["morans_I"]) * 1.25 + 0.02)
-    ax.set_title("Spatial autocorrelation rises as noise falls\n"
-                 "residual (rate − regime mean) stays clustered → regime doesn't absorb it "
-                 "(* p<0.05)", fontsize=11.5, loc="left")
-    for s in ("top", "right"):
-        ax.spines[s].set_visible(False)
-    _save(fig, "fig_moran_threshold.png")
+    df = pd.DataFrame(rows)
+    _write(df, "task5a_moran_threshold.csv")
     print(df.to_string(index=False))
     return df
 
@@ -563,7 +514,7 @@ def regime_dispersion():
     rate = d["n_events"].sum() / d["rider_km"].sum()
     mu = (rate * d["rider_km"]).clip(lower=1e-9)
     pooled = ((d["n_events"] - mu) ** 2 / mu).sum() / (len(d) - 1)
-    _write(df, "regime_dispersion.csv")
+    _write(df, "task5a_regime_dispersion.csv")
 
     fig, ax = plt.subplots(figsize=(8.5, 0.5 * len(df) + 1.4))
     ax.barh(range(len(df)), df["dispersion"], color=ACC, alpha=0.85)
@@ -581,84 +532,123 @@ def regime_dispersion():
                  fontsize=11.5, loc="left")
     for s in ("top", "right"):
         ax.spines[s].set_visible(False)
-    _save(fig, "fig_regime_dispersion.png")
+    _save(fig, "task5a_regime_dispersion.png")
     print(df.to_string(index=False), f"\n  pooled dispersion = {pooled:.2f}")
     return df
 
 
-def forest_support_table():
-    """Reproduce the exact binning of the Task-4 forest plot and write the
-    numbers behind every row: events, exposure, rate, ratio-to-average, 95%
-    interval, and a support flag (solid >=100 events, ok 30-100, thin <30)."""
+
+
+def exposure_unit_choice(n_bins=10):
+    """Why the risk model measures exposure in rider-HOURS, not traversals or rider-km.
+
+    Overtaking is a temporal arrival process — cars pass a rider at some rate per unit of
+    TIME — so the natural Poisson offset is time-at-risk. The candidates are linked by an
+    identity,
+        rate_per_km = rate_per_hour / speed,
+    so a per-km rate carries the rider's speed inside it: wherever cyclists are slow
+    (junctions, congestion, pedestrian zones) it is inflated by the slowness itself rather
+    than by extra danger.
+
+    Three model-free checks:
+      (1) speed varies systematically by street type, and the per-km relative rate is
+          strongly rank-correlated with slowness — per-km partly measures speed;
+      (2) a Poisson GLM (N ~ regime, log-exposure offset) keeps the SAME response N under
+          all three offsets, so their AIC is directly comparable;
+      (3) a clean offset makes counts proportional to exposure: adding log(E) as a
+          covariate on top of the log(E) offset should give a slope of 0.
+    """
+    import statsmodels.api as sm
+    from scipy.stats import spearmanr
+
+    units = {"per traversal": "n_traversals", "per rider-km": "rider_km",
+             "per rider-hour": "rider_h"}
+    cols = {"per traversal": MUTED, "per rider-km": ACC2, "per rider-hour": ACC}
+
     o = pd.read_csv(ORACLE)
-    obs = o[o["is_observed"]].copy()
-    tr = pd.read_csv(TRAV)
-    ev = pd.read_csv(EVENTS)
-    tr["enter_time"] = pd.to_datetime(tr["enter_time"], utc=True, format="mixed")
-    ev["time"] = pd.to_datetime(ev["time"], utc=True, format="mixed")
-    tr["km"] = tr["length_m"] / 1000.0
-    overall = obs["n_events"].sum() / obs["rider_km"].sum()
+    d = o[o["is_observed"] & (o["rider_km"] > 0) & (o["rider_h"] > 0)].copy()
 
-    rows = []
+    # (1) what a per-km rate silently contains -------------------------------
+    reg = d.groupby("edge_class").agg(events=("n_events", "sum"),
+                                      km=("rider_km", "sum"), hr=("rider_h", "sum"))
+    reg = reg[reg["events"] >= 20].copy()
+    reg["speed_kmh"] = reg["km"] / reg["hr"]
+    reg["rel_km"] = (reg["events"] / reg["km"]) / (d["n_events"].sum() / d["rider_km"].sum())
+    reg["rel_hr"] = (reg["events"] / reg["hr"]) / (d["n_events"].sum() / d["rider_h"].sum())
+    reg = reg.sort_values("speed_kmh")
+    rho_km = float(spearmanr(reg["speed_kmh"], reg["rel_km"]).statistic)
+    rho_hr = float(spearmanr(reg["speed_kmh"], reg["rel_hr"]).statistic)
 
-    def add(group, label, n, e):
-        n, e = float(n), float(e)
-        if n < 5 or e <= 0:
-            return
-        rate, lo, hi = _poisson_ci(n, e)
-        flag = "solid" if n >= 100 else ("ok" if n >= 30 else "THIN")
-        rows.append(dict(group=group, label=str(label), events=int(n),
-                         rider_km=round(e, 1), rate=round(rate, 3),
-                         x_average=round(rate / overall, 2), lo=round(lo, 3),
-                         hi=round(hi, 3), support=flag))
+    # (2) GLM fit + (3) proportionality of counts to exposure -----------------
+    dummies = pd.get_dummies(d["edge_class"], drop_first=True, dtype=float)
+    X = sm.add_constant(dummies)
+    rows, curves = [], {}
+    for lab, col in units.items():
+        logE = np.log(d[col])
+        m = sm.GLM(d["n_events"], X, family=sm.families.Poisson(), offset=logE).fit()
+        # slope of log(E) ON TOP of the log(E) offset: 0 => counts scale with exposure.
+        # (bin-free, unlike a decile ratio — n_traversals is discrete and bins coarsely)
+        Xs = sm.add_constant(pd.concat([dummies, logE.rename("logE")], axis=1))
+        ms = sm.GLM(d["n_events"], Xs, family=sm.families.Poisson(), offset=logE).fit()
+        b = (d.groupby(pd.qcut(d[col], n_bins, duplicates="drop"), observed=True)
+             .agg(N=("n_events", "sum"), E=(col, "sum")))
+        curves[lab] = (b["N"] / b["E"]).to_numpy() / (d["n_events"].sum() / d[col].sum())
+        rows.append(dict(unit=lab, AIC=round(m.aic, 1),
+                         dispersion=round(m.pearson_chi2 / m.df_resid, 2),
+                         scale_slope=round(float(ms.params["logE"]), 3),
+                         slope_p=round(float(ms.pvalues["logE"]), 4)))
+    summary = pd.DataFrame(rows)
+    summary["dAIC"] = (summary["AIC"] - summary["AIC"].min()).round(1)
+    _write(summary, "task5a_exposure_unit_choice.csv")
+    _write(reg.round(3).reset_index(), "task5a_exposure_unit_by_regime.csv")
 
-    def edge_bins(group, col, bins, labels):
-        d = obs.dropna(subset=[col]).copy()
-        d["_b"] = pd.cut(d[col], bins, labels=labels)
-        g = d.groupby("_b", observed=True).agg(e=("n_events", "sum"), k=("rider_km", "sum"))
-        for lab, r in g.iterrows():
-            add(group, lab, r["e"], r["k"])
+    best = summary.loc[summary["AIC"].idxmin(), "unit"]
+    print(summary.to_string(index=False))
+    print(f"\n  speed across street types: {reg['speed_kmh'].min():.1f}-{reg['speed_kmh'].max():.1f} km/h")
+    print(f"  rank corr(speed, relative rate): per-km {rho_km:+.2f} | per-hour {rho_hr:+.2f}"
+          "   <- per-km tracks slowness more closely")
+    print(f"  best offset by AIC: {best}")
 
-    g = (obs.groupby("edge_class").agg(e=("n_events", "sum"), k=("rider_km", "sum"))
-         .sort_values("e", ascending=False))
-    for lab, r in g[g["e"] >= 20].iterrows():
-        add("riding regime", lab.replace("_", " "), r["e"], r["k"])
-    edge_bins("bicycle accidents", "n_acc_bike", [-1, 0, 1, 3, 1000], ["none", "1", "2–3", "4+"])
-    edge_bins("speed limit", "maxspeed_kmh", [0, 20, 30, 50, 200], ["<=20", "21-30", "31-50", ">50"])
-    edge_bins("betweenness", "betweenness", [-1, 1e-5, 1e-4, 1e-3, 1], ["lowest", "low", "mid", "high"])
-    edge_bins("measured AADT", "aadt_kfz", [0, 5000, 12000, 1e6], ["<5k", "5-12k", ">12k"])
-    hb, hl = [-1, 6, 9, 15, 19, 24], ["night", "morning peak", "midday", "evening peak", "late"]
-    ev_h = pd.cut(ev["time"].dt.hour, hb, labels=hl).value_counts().reindex(hl, fill_value=0)
-    km_h = tr.groupby(pd.cut(tr["enter_time"].dt.hour, hb, labels=hl), observed=False)["km"].sum().reindex(hl)
-    for lab in hl:
-        add("time of day", lab, ev_h[lab], km_h[lab])
-    wmap = {False: "weekday", True: "weekend"}
-    ev_w = (ev["time"].dt.dayofweek >= 5).map(wmap).value_counts()
-    km_w = tr.groupby((tr["enter_time"].dt.dayofweek >= 5).map(wmap))["km"].sum()
-    for lab in ["weekday", "weekend"]:
-        add("day type", lab, ev_w.get(lab, 0), km_w.get(lab, 0))
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(13.5, 4.8),
+                                   gridspec_kw={"wspace": 0.45})
+    for lab, c in curves.items():
+        ax1.plot(np.linspace(1, 10, len(c)), c, "-o", color=cols[lab], ms=5, lw=2, label=lab)
+    ax1.axhline(1, color=INK, ls="--", lw=1)
+    ax1.set_xlabel("edge exposure decile  (low → high)")
+    ax1.set_ylabel("rate ÷ overall rate")
+    ax1.set_title("A clean offset leaves the rate flat", fontsize=11, loc="left")
+    ax1.legend(frameon=False, fontsize=9, loc="upper right")
 
-    df = pd.DataFrame(rows)
-    _write(df, "forest_support_table.csv")
-    thin = df[df["support"] == "THIN"]
-    print(df.to_string(index=False))
-    print(f"\n  overall rate = {overall:.3f} /rider-km")
-    print(f"  THIN rows (<30 overtakes, treat with caution): "
-          f"{', '.join(thin['group'] + ':' + thin['label']) if len(thin) else 'none'}")
-    return df
+    y = np.arange(len(reg))
+    ax2.hlines(y, reg["rel_km"], reg["rel_hr"], color="0.82", lw=2.5, zorder=1)
+    ax2.scatter(reg["rel_km"], y, color=ACC2, s=45, zorder=3, label="per rider-km")
+    ax2.scatter(reg["rel_hr"], y, color=ACC, s=45, zorder=3, label="per rider-hour")
+    ax2.axvline(1, color=INK, ls="--", lw=1)
+    ax2.set_yticks(y)
+    ax2.set_yticklabels([f"{r.replace('_', ' ')}  ({s:.0f} km/h)"
+                         for r, s in zip(reg.index, reg["speed_kmh"])], fontsize=8.5)
+    ax2.invert_yaxis()
+    ax2.set_xlabel("relative overtake rate  (1 = network average)")
+    ax2.set_title(f"Per-km inflates the SLOW streets  (speed ρ = {rho_km:+.2f})",
+                  fontsize=11, loc="left")
+    ax2.legend(frameon=False, fontsize=9, loc="lower right")
+    for a in (ax1, ax2):
+        for s in ("top", "right"):
+            a.spines[s].set_visible(False)
+    _save(fig, "task5a_exposure_unit_choice.png")
+    return summary
 
 
 def main():
     _setup()
-    for name, fn in [("RIDER DOMINANCE", rider_dominance),
+    for name, fn in [("EXPOSURE UNIT CHOICE (why rider-hours)", exposure_unit_choice),
+                     ("RIDER DOMINANCE", rider_dominance),
                      ("REGIME DISPERSION", regime_dispersion),
                      ("TEMPORAL DRIFT (clustered rate-ratio test)", temporal_drift),
                      ("POISSON vs NEGATIVE BINOMIAL", poisson_vs_nb),
                      ("COVARIATE ADJUSTMENT (marginal vs regime-adjusted)", covariate_adjustment),
                      ("COVARIATE CORRELATION HEATMAP", covariate_correlation),
-                     ("INTERSECTION ROBUSTNESS (ranking check)", intersection_robustness),
-                     ("MORAN'S I BY THRESHOLD", moran_by_threshold),
-                     ("FOREST-PLOT SUPPORT TABLE", forest_support_table)]:
+                     ("MORAN'S I BY THRESHOLD", moran_by_threshold)]:
         print(f"\n{'=' * 70}\n{name}\n{'=' * 70}")
         fn()
 

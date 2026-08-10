@@ -6,14 +6,15 @@ Every event inherits the edge of its anchor point (falling back to its first/las
 point); where several classified edges share a node pair (road vs parallel
 sidepath, multigraph keys), the class comes from the geometry nearest the event.
 
-Run AFTER senseboxbike_preprocessing_task2.py. If matched files already exist,
+Run AFTER task2b_overtake_events.py. If matched files already exist,
 matching is skipped (delete them to force a re-match).
 
 Writes to output/task3_matching/:
-  matched_points_task3.gpkg   points with matched edge (u, v), travel order
-  matched_events_task3.gpkg   events with edge (u, v) + edge_class + link_via
-  match_summary_task3.csv     match/link/direction descriptives (for slides)
-  matched_per_box_task3/      one validation page per box
+  task3_matched_points.gpkg   points with matched edge (u, v), travel order
+  task3_matched_events.gpkg   events with edge (u, v) + edge_class + link_via
+  task3_match_summary.csv     match/link/direction descriptives (for slides)
+  task3_matched_per_box/      one validation page per box
+and the coverage map for this stage to output/figures/.
 """
 from pathlib import Path
 import logging
@@ -24,21 +25,24 @@ import numpy as np
 import osmnx as ox
 import pandas as pd
 import matplotlib.pyplot as plt
+from matplotlib.lines import Line2D
+from shapely.geometry import LineString
 
 logging.getLogger("leuvenmapmatching").setLevel(logging.WARNING)
 
 from leuvenmapmatching.matcher.distance import DistanceMatcher
 from leuvenmapmatching.map.inmem import InMemMap
-from diagnostics_task2 import GRAPH_PATH
+from task1_network import GRAPH_PATH      # the graph is a task-1 artifact
 
 OUT_DIR = Path("output/task3_matching")
-POINTS_PATH = Path("output/task2_trajectories/trajectory_points_task2.gpkg")
-EVENTS_PATH = Path("output/task2_trajectories/overtake_events_task2.gpkg")
+FIG_DIR = Path("output/figures")
+POINTS_PATH = Path("output/task2_trajectories/task2b_trajectory_points.gpkg")
+EVENTS_PATH = Path("output/task2_trajectories/task2b_overtake_events.gpkg")
 EDGES_PATH = Path("input/muenster_edges_classified.gpkg")
-MATCHED_POINTS_PATH = OUT_DIR / "matched_points_task3.gpkg"
-MATCHED_EVENTS_PATH = OUT_DIR / "matched_events_task3.gpkg"
-MATCH_SUMMARY_CSV = OUT_DIR / "match_summary_task3.csv"
-PER_BOX_MATCH_DIR = OUT_DIR / "matched_per_box_task3"
+MATCHED_POINTS_PATH = OUT_DIR / "task3_matched_points.gpkg"
+MATCHED_EVENTS_PATH = OUT_DIR / "task3_matched_events.gpkg"
+MATCH_SUMMARY_CSV = OUT_DIR / "task3_match_summary.csv"
+PER_BOX_MATCH_DIR = OUT_DIR / "task3_matched_per_box"
 
 MAX_DIST = 50
 OBS_NOISE = 15
@@ -46,6 +50,9 @@ MAX_DIST_INIT = 60
 MIN_PROB_NORM = 0.001
 
 VALUE_VMAX = 250  # clearance scale cap for point sizing
+
+INK, NET = "#0b0b0b", "#d9d9d6"
+RIDE, EVENT = "#2a78d6", "#e34948"
 
 
 def build_inmem_map(graph_path=GRAPH_PATH):
@@ -299,7 +306,61 @@ def plot_match_per_box(matched_points, edges_path=EDGES_PATH, out_dir=PER_BOX_MA
     print(f"[plot] per-box match validation -> {out_dir}/")
 
 
-if __name__ == "__main__":
+def _ride_lines(points):
+    """One LineString per ride, in travel order — the ridden tracks for the map."""
+    recs = []
+    for tid, t in points.groupby("traj_id"):
+        t = t.sort_values("createdAt")
+        if len(t) >= 2:
+            recs.append({"traj_id": tid, "geometry": LineString(t.geometry.values)})
+    return gpd.GeoDataFrame(recs, geometry="geometry", crs=points.crs)
+
+
+def fig_coverage_map(matched_points, matched_events):
+    """Matched rides and overtake events over the whole cyclable network — how much
+    of the city the collection actually reaches."""
+    edges = gpd.read_file(EDGES_PATH)
+    lines = _ride_lines(matched_points)
+
+    xlo, xhi = matched_points.geometry.x.quantile([0.01, 0.99])
+    ylo, yhi = matched_points.geometry.y.quantile([0.01, 0.99])
+    pad = 0.04 * max(xhi - xlo, yhi - ylo)
+
+    fig, ax = plt.subplots(figsize=(11, 11))
+    edges.plot(ax=ax, color=NET, linewidth=0.4, zorder=0)
+    lines.plot(ax=ax, color=RIDE, linewidth=0.55, alpha=0.35, zorder=1)
+    matched_events.plot(ax=ax, color=EVENT, markersize=7, alpha=0.55,
+                        edgecolor="white", linewidth=0.2, zorder=2)
+    ax.set_xlim(xlo - pad, xhi + pad)
+    ax.set_ylim(ylo - pad, yhi + pad)
+    ax.set_aspect("equal")
+    ax.set_axis_off()
+
+    handles = [
+        Line2D([], [], color=NET, lw=1.8, label="cyclable network"),
+        Line2D([], [], color=RIDE, lw=1.8, alpha=0.7,
+               label=f"ridden tracks ({lines['traj_id'].nunique()} rides, "
+                     f"{lines.length.sum() / 1000:.0f} km)"),
+        Line2D([], [], color=EVENT, marker="o", ls="", markersize=8,
+               markeredgecolor="white", markeredgewidth=0.4,
+               label=f"overtake events ({len(matched_events):,})"),
+    ]
+    leg = ax.legend(handles=handles, loc="lower left", frameon=True, fontsize=12.5,
+                    handletextpad=0.7, borderpad=0.9, labelspacing=0.6)
+    leg.get_frame().set_facecolor("white")
+    leg.get_frame().set_edgecolor("none")
+    leg.get_frame().set_alpha(0.85)
+    ax.set_title("Map-matched rides and car-overtake events — Münster",
+                 fontsize=17, color=INK, loc="left", pad=12)
+
+    FIG_DIR.mkdir(parents=True, exist_ok=True)
+    p = FIG_DIR / "task3_coverage_map.png"
+    fig.savefig(p, dpi=220, bbox_inches="tight")
+    plt.close(fig)
+    print(f"[fig] saved -> {p}")
+
+
+def main():
     if MATCHED_POINTS_PATH.exists() and MATCHED_EVENTS_PATH.exists():
         print(f"[skip] {MATCHED_POINTS_PATH.name} exists -> summary + plots only "
               "(delete it to force a re-match)")
@@ -327,3 +388,8 @@ if __name__ == "__main__":
 
     match_summary(matched_points, matched_events, G)
     plot_match_per_box(matched_points)
+    fig_coverage_map(matched_points, matched_events)
+
+
+if __name__ == "__main__":
+    main()

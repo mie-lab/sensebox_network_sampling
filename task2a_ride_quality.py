@@ -12,10 +12,10 @@ Quality: flag a ride as bad when
 A ride with zero flags is kept.
 
 Writes to output/task2_diagnostics/:
-  segmented_points_task2.gpkg    ALL rides' points (senseboxbike_preprocessing_task2.py
+  task2a_segmented_points.gpkg    ALL rides' points (task2b_overtake_events.py
                                  reads this -- no recomputation downstream)
-  trajectory_quality_task2.csv   one row per ride: stats, flags, keep verdict
-  diagnostics_summary_task2.csv  headline numbers + threshold sensitivity, for slides
+  task2a_trajectory_quality.csv   one row per ride: stats, flags, keep verdict
+  task2a_diagnostics_summary.csv  headline numbers + threshold sensitivity, for slides
   box_overview + per-box PNGs    maps for eyeballing each box's rides
 """
 from pathlib import Path
@@ -28,20 +28,21 @@ import pandas as pd
 import matplotlib.pyplot as plt
 from shapely.geometry import LineString
 
+from task1_network import GRAPH_PATH   # the graph is a task-1 artifact; one definition
+
 CRS_WGS84 = "EPSG:4326"
 CRS_METRIC = "EPSG:25832"            # UTM 32N, same as the network graph
 BOX_ID_COL = "boxId"
 
-GRAPH_PATH = Path("input/muenster_bike.graphml")
 INPUT_CSV = Path("input/muenster_overtaking_distance_2024-07_2026-07.csv")
 MANOEUVRE_CSV = Path("input/muenster_overtaking_manoeuvre_2024-07_2026-07.csv")
 
 OUT_DIR = Path("output/task2_diagnostics")
-SEG_POINTS_PATH = OUT_DIR / "segmented_points_task2.gpkg"
-QUALITY_CSV = OUT_DIR / "trajectory_quality_task2.csv"
-SUMMARY_CSV = OUT_DIR / "diagnostics_summary_task2.csv"
-OVERVIEW_PATH = OUT_DIR / "box_overview_task2.png"
-PER_BOX_DIR = OUT_DIR / "per_box_task2"
+SEG_POINTS_PATH = OUT_DIR / "task2a_segmented_points.gpkg"
+QUALITY_CSV = OUT_DIR / "task2a_trajectory_quality.csv"
+SUMMARY_CSV = OUT_DIR / "task2a_diagnostics_summary.csv"
+OVERVIEW_PATH = OUT_DIR / "task2a_box_overview.png"
+PER_BOX_DIR = OUT_DIR / "task2a_per_box"
 
 BBOX_PAD_M = 2000
 GAP_MINUTES = 10           # silence longer than this starts a new ride

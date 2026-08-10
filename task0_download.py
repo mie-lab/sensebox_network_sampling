@@ -1,7 +1,8 @@
 """Download Muenster senseBox:bike overtaking data from openSenseMap.
 
 Set DOWNLOAD_START / DOWNLOAD_END, then run. One CSV per channel is written to
-input/, named after the date range; rows are deduplicated (the API repeats rows).
+input/, named after the date range (overtake distance or maneuver)
+since rows are deduplicated (the API repeats rows).
 """
 import time
 import urllib.parse
@@ -11,18 +12,18 @@ from pathlib import Path
 
 import pandas as pd
 
-# ---- what to download -------------------------------------------------------
+# ======= what to download ======
 DOWNLOAD_START = datetime(2024, 7, 1, tzinfo=timezone.utc)  # overtaking channels exist since 2024-07
 DOWNLOAD_END = datetime(2026, 7, 1, tzinfo=timezone.utc)
+
 BBOX = "7.45,51.82,7.80,52.08"                              # Muenster + margin
 PHENOMENA = ["Overtaking Distance", "Overtaking Manoeuvre"]
 COLUMNS = "lat,lon,boxName,boxId,unit,value,createdAt"
-# -----------------------------------------------------------------------------
+# ================================
 
 
 def fetch(phenomenon, month_start, month_end):
-    """One API request for one month. Retries up to 5 times, then aborts the
-    run: a silently missing month would corrupt the dataset."""
+    """One API request for one month. Retries up to 5 times, then aborts the run."""
     url = (
         "https://api.opensensemap.org/boxes/data?"
         + urllib.parse.urlencode({
