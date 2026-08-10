@@ -10,11 +10,13 @@ dependencies:
   - networkx
   - notebook
   - numpy
+  - seaborn
+  - shapely
   - osmnx
   - pandas
   - python=3.14
   - scikit-learn
   - scipy
-  - conda-forge::statsmodels
+  - statsmodels
   - pip:
-      - leuvenmapmatchingprefix
+      - leuvenmapmatching
