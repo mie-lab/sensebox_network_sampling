@@ -1,32 +1,24 @@
-"""Build the per-edge oracle: the table the risk model screens.
+"""Build the per-edge oracle, the table the risk model screens.
 
-Unit = a DIRECTED edge (u -> v). Both orientations of every street are present,
-because a cyclist can ride either way (contraflow on one-ways is common, and ~4%
-of matched points travel against the digitised direction). The undirected key
-(u_lo, v_hi) is carried so the model can pool directions where data is thin.
+The unit is a directed edge (u -> v). Both orientations of every street are present,
+because a cyclist can ride either way and contraflow on one-ways is common. The undirected
+key (u_lo, v_hi) is carried so directions can be pooled where data is thin. Every edge in
+the network gets a row, including never-ridden ones (n_traversals = 0): screening covers
+the whole network, so a blank has to be a row rather than a gap.
 
-Every edge in the network is present, including those never ridden
-(n_traversals = 0) — screening covers the whole network, so "never observed" has
-to be a row, not a missing one.
+A traversal is not a fixed amount of exposure. Median time on an edge is a few seconds, but
+some last minutes when a rider waits for traffic. So each traversal carries both its
+distance (the edge's OSM length) and its time (summed per-point dwell). Rates are offered
+per traversal, per rider-km and per rider-hour; choosing one is a task 5 decision.
 
-Exposure: a traversal is not a fixed amount of exposure. Median time on an edge
-is ~5 s but some traversals last many minutes (a rider stopped while traffic
-passes), so each traversal carries
-  distance = the edge's OSM length (assumes the whole edge was ridden)
-  time     = sum of per-point dwell (each point's gap to the next GPS point in the
-             ride), so even a single-point traversal gets its real enter->leave
-             seconds instead of 0.
-Rates are offered per traversal / rider-km / rider-hour; which denominator the
-estimand uses is a modelling decision, not one made here.
+The descriptive figures are built here too, straight from these tables, so a figure cannot
+disagree with the oracle it describes.
 
-Outputs (output/task4_oracle/):
-  edge_traversals  one row per (directed edge, ride)
-  edge_events      one row per overtake event
-  edge_oracle      one row per directed edge: exposure, counts, covariates
-
-The coverage figures for the deck are built here too, straight from those tables —
-so a figure can never disagree with the oracle it describes. They pool the two travel
-directions (coverage is a property of the street, not of one direction).
+Writes to output/task4_oracle/:
+  task4_edge_traversals.csv   one row per directed edge and ride
+  task4_edge_events.csv       one row per overtake
+  task4_edge_oracle.csv       one row per directed edge: exposure, counts, covariates
+plus coverage and support tables, and figures to output/figures/.
 """
 from pathlib import Path
 
@@ -49,8 +41,8 @@ ORACLE_CSV = OUT_DIR / "task4_edge_oracle.csv"
 
 GAP_CAP_S = 15
 
-INK, MUTED = "#0b0b0b", "#52514e"
-RIDE, EVENT = "#2a78d6", "#e34948"
+INK, MUTED = "black", "dimgrey"
+BLUE, RED = "blue", "red"           # primary / accent
 # riding regimes coloured as an exposure gradient: away from traffic (green/blue)
 # -> painted/semi (yellow) -> shared with motor traffic (orange/red)
 REGIME_COLORS = {
@@ -66,7 +58,7 @@ REGIME_COLORS = {
     "main_road_shared":   "#e34948",
     "bus_lane":           "#a11526",
 }
-plt.rcParams.update({"font.size": 12, "text.color": INK,
+plt.rcParams.update({"font.size": 11, "text.color": INK,
                      "figure.facecolor": "white", "savefig.facecolor": "white"})
 
 
@@ -267,11 +259,11 @@ def fig_overtake_rate(cov):
     tt = np.linspace(0, T.max(), 200)
     fig, ax = plt.subplots(figsize=(9.5, 6.8))
     ax.fill_between(tt, np.maximum(lam * tt - 1.96 * np.sqrt(lam * tt), 0),
-                    lam * tt + 1.96 * np.sqrt(lam * tt), color=RIDE, alpha=0.12,
+                    lam * tt + 1.96 * np.sqrt(lam * tt), color=BLUE, alpha=0.12,
                     label="Poisson 95% band (pure chance)")
-    ax.plot(tt, lam * tt, color=RIDE, lw=2, label=f"expected rate  ({lam:.3f} / traversal)")
+    ax.plot(tt, lam * tt, color=BLUE, lw=2, label=f"expected rate  ({lam:.3f} / traversal)")
     ax.scatter(jx[~hot], jy[~hot], s=7, color="0.6", alpha=0.35, edgecolor="none", zorder=2)
-    ax.scatter(jx[hot], jy[hot], s=14, color=EVENT, alpha=0.7, edgecolor="none",
+    ax.scatter(jx[hot], jy[hot], s=14, color=RED, alpha=0.7, edgecolor="none",
                zorder=3, label=f"above the chance band ({hot.sum()} edges, {hot.mean():.0%})")
 
     ax.set_xlabel("exposure — traversals of the edge  →")
@@ -348,8 +340,8 @@ def fig_coverage_concentration(cov):
 
     fig, ax = plt.subplots(figsize=(8, 6.5))
     ax.plot([0, 1], [0, 1], color="0.7", ls="--", lw=1, label="if coverage were uniform")
-    ax.plot(x, y, color=RIDE, lw=2.4, label="observed")
-    ax.fill_between(x, y, color=RIDE, alpha=0.08)
+    ax.plot(x, y, color=BLUE, lw=2.4, label="observed")
+    ax.fill_between(x, y, color=BLUE, alpha=0.08)
     for fx in (0.05, 0.10):
         fy = y[int(fx * n) - 1]
         ax.plot([fx, fx], [0, fy], color=MUTED, lw=0.8, ls=":")
@@ -378,7 +370,7 @@ def fig_coverage_by_regime(cov):
     g["depth"] = g["edge_class"].map(depth)
     g = g[g["n_edges"] >= 20].sort_values("cov")   # ascending -> best on top
     y = np.arange(len(g))
-    cols = [REGIME_COLORS.get(c, RIDE) for c in g["edge_class"]]
+    cols = [REGIME_COLORS.get(c, BLUE) for c in g["edge_class"]]
 
     fig, (axL, axR) = plt.subplots(1, 2, figsize=(12, 6.5), sharey=True,
                                    gridspec_kw={"wspace": 0.06})
@@ -474,7 +466,7 @@ def overtake_coverage(oracle, top=10):
     _write(pd.DataFrame({"overtakes": labels, "edges": hist}), "task4_overtake_coverage.csv")
 
     fig, ax = plt.subplots(figsize=(7.2, 4))
-    ax.bar(range(len(hist)), hist, color=[MUTED] + [RIDE] * (len(hist) - 1), alpha=0.9)
+    ax.bar(range(len(hist)), hist, color=[MUTED] + [BLUE] * (len(hist) - 1), alpha=0.9)
     ax.set_yscale("log")
     ax.set_ylim(0.7, max(hist) * 4)
     for i, v in enumerate(hist):
@@ -702,7 +694,7 @@ def fig_rate_predictors(oracle, trav, ev):
 
     d = pd.DataFrame(rows, columns=["group", "label", "ratio", "lo", "hi", "n"])
     groups = list(dict.fromkeys(d["group"]))
-    colors = {g: c for g, c in zip(groups, [RIDE, EVENT, "#eda100", "#1baf7a",
+    colors = {g: c for g, c in zip(groups, [BLUE, RED, "#eda100", "#1baf7a",
                                             "#4a3aa7", "#eb6834", "#52514e"])}
 
     fig, ax = plt.subplots(figsize=(7.6, 0.3 * len(d) + 1.8))

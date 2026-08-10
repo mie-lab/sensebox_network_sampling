@@ -1,18 +1,15 @@
-"""Extract overtake events from the quality-checked rides.
+"""Extract overtake events from the rides that passed quality control.
 
-Reads the segmented points and the keep verdict written by task2a_ride_quality.py
-(run that first), keeps only approved rides, and collapses bursts of high
-"Overtaking Manoeuvre" probability (man_p >= MAN_P_TAU, gaps <= MERGE_GAP_S
-merged) into one event per car pass.
-
-Each event carries first/last/anchor point ids so task3_mapmatching.py can pin it onto a matched edge;
-the anchor is the highest-probability point (best guess for the moment the car was alongside).
+Keeps only approved rides, then collapses each burst of high manoeuvre probability
+(man_p >= MAN_P_TAU, gaps up to MERGE_GAP_S merged) into one event per car pass. Each
+event carries first, last and anchor point ids so task 3 can pin it onto a matched edge.
+The anchor is the highest-probability point, the best guess for when the car was alongside.
 
 Writes to output/task2_trajectories/:
-  task2b_trajectory_points.gpkg   points of the kept rides (input to map-matching)
-  task2b_overtake_events.gpkg     one row per overtake event
-  task2b_trajectory_summary.csv   one row per ride
-and the two slide figures for this stage to output/figures/.
+  task2b_trajectory_points.gpkg    points of the kept rides, the input to map-matching
+  task2b_overtake_events.gpkg      one row per overtake
+  task2b_trajectory_summary.csv    one row per ride
+plus two figures to output/figures/.
 """
 from pathlib import Path
 
@@ -38,10 +35,9 @@ MERGE_GAP_S = 5                      # gap below which two bursts are one event
 MIN_LENGTH_KM = 0.2
 MAX_LEGEND = 15
 
-INK, MUTED = "#0b0b0b", "#52514e"
-RIDE, EVENT = "#2a78d6", "#e34948"
-plt.rcParams.update({"font.size": 12, "text.color": INK,
-                     "figure.facecolor": "white", "savefig.facecolor": "white"})
+INK, MUTED = "black", "dimgrey"
+BLUE, RED = "blue", "red"           # primary / accent
+plt.rcParams.update({"font.size": 11, "text.color": INK, "figure.facecolor": "white", "savefig.facecolor": "white"})
 
 
 def load_kept_points(points_path=SEG_POINTS_PATH, quality_csv=QUALITY_CSV):
@@ -160,7 +156,7 @@ def fig_box_activity(summary):
         ax.plot([first[name], last[name]], [y, y], color="0.86", lw=3,
                 solid_capstyle="round", zorder=1)
     ax.scatter(s["start_num"], [ypos[n] for n in s["boxName"]],
-               s=12, color=RIDE, alpha=0.8, marker="|", linewidths=1.1, zorder=2)
+               s=12, color=BLUE, alpha=0.8, marker="|", linewidths=1.1, zorder=2)
 
     ax.set_yticks(range(len(order)))
     ax.set_yticklabels([n[:22] for n in order], fontsize=7)
@@ -203,9 +199,9 @@ def fig_overtake_extraction(pts, traj_id="67226da749d0900007ca343c_40",
         for _, g in gated.groupby(brk):
             for ax in (ax1, ax2):
                 ax.axvspan(g["s"].min() - 0.5, g["s"].max() + 0.5,
-                           color=EVENT, alpha=0.13, zorder=0)
+                           color=RED, alpha=0.13, zorder=0)
 
-    ax1.plot(w["s"], w["man_p"], color=RIDE, lw=1.6)
+    ax1.plot(w["s"], w["man_p"], color=BLUE, lw=1.6)
     ax1.axhline(MAN_P_TAU, color=MUTED, ls="--", lw=1)
     ax1.text(w["s"].min(), MAN_P_TAU + 0.03, f"gate  τ = {MAN_P_TAU}",
              color=MUTED, fontsize=10)

@@ -1,22 +1,18 @@
-"""Data intake + ride quality check: build clean rides once, decide which may proceed.
+"""Build clean rides from the raw points, and decide which of them are usable.
 
-Intake: load the distance channel, drop mislabeled/duplicate rows, join the
-"Overtaking Manoeuvre" classifier channel by (box, timestamp), clip to the
-network area, cut into rides on >10 min gaps, give every point a stable id.
+Intake: load the distance channel, drop mislabelled and duplicate rows, join the
+manoeuvre-classifier channel on (box, timestamp), clip to the network area, cut into rides
+on gaps over 10 minutes, and give every point a stable id.
 
-Quality: flag a ride as bad when
-  f_stuck         distance readings barely vary over the whole ride -> sensor was blocked
-  f_no_manoeuvre  the classifier channel is missing -> overtakes cannot be counted
-  f_speed         average speed is not cycling (below 3 or above 40 km/h)
-  f_too_short     ride too short to use (under 5 points or 0.2 km)
-A ride with zero flags is kept.
+A ride is dropped when the distance readings barely vary (sensor blocked), the classifier
+channel is missing (overtakes uncountable), the mean speed is not cycling (under 3 or over
+40 km/h), or the ride is too short to use (under 5 points or 0.2 km). Zero flags means keep.
 
 Writes to output/task2_diagnostics/:
-  task2a_segmented_points.gpkg    ALL rides' points (task2b_overtake_events.py
-                                 reads this -- no recomputation downstream)
-  task2a_trajectory_quality.csv   one row per ride: stats, flags, keep verdict
-  task2a_diagnostics_summary.csv  headline numbers + threshold sensitivity, for slides
-  box_overview + per-box PNGs    maps for eyeballing each box's rides
+  task2a_segmented_points.gpkg     all rides' points, read directly by task 2b
+  task2a_trajectory_quality.csv    one row per ride: stats, flags, keep verdict
+  task2a_diagnostics_summary.csv   headline numbers and threshold sensitivity
+  task2a_box_overview.png          plus one map per box, for eyeballing
 """
 from pathlib import Path
 import re
@@ -32,7 +28,13 @@ from task1_network import GRAPH_PATH   # the graph is a task-1 artifact; one def
 
 CRS_WGS84 = "EPSG:4326"
 CRS_METRIC = "EPSG:25832"            # UTM 32N, same as the network graph
+
 BOX_ID_COL = "boxId"
+
+BLUE, RED = "blue", "red"           # primary / accent
+INK, MUTED = "black", "dimgrey"     # text / secondary
+plt.rcParams.update({"font.size": 11, "text.color": INK,
+                     "figure.facecolor": "white", "savefig.facecolor": "white"})
 
 INPUT_CSV = Path("input/muenster_overtaking_distance_2024-07_2026-07.csv")
 MANOEUVRE_CSV = Path("input/muenster_overtaking_manoeuvre_2024-07_2026-07.csv")

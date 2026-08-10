@@ -1,33 +1,29 @@
-"""Task 5 — Empirical-Bayes Poisson-Gamma overtake risk model.
-Estimate the overtake rate for each directed street segment (u, v).
+"""Empirical-Bayes Poisson-Gamma overtake risk model.
 
-Notation
---------
-N : observed overtakes
-E : rider-hours (exposure)
-λ : true overtake rate (per rider-hour)
-m : mean rate for a street type (regime)
-a_r, b_r : Gamma prior parameters for regime r
+Estimates an overtake rate for every directed edge, shrinking each edge toward its street
+type by an amount set by how much that edge was actually ridden.
 
-Model
------
-    N | λ ~ Poisson(λE)
-    λ ~ Gamma(a_r, b_r)
+  N          overtakes observed on an edge
+  E          exposure, in rider-hours
+  lambda     the edge's true overtake rate, per rider-hour
+  a_r, b_r   Gamma prior for street type r, fitted from the training data by moments
 
-    => λ | N, E ~ Gamma(a_r + N, b_r + E)
+    N | lambda ~ Poisson(lambda E)
+    lambda ~ Gamma(a_r, b_r)
+    => lambda | N, E ~ Gamma(a_r + N, b_r + E)
 
-Posterior mean:
-    λ̂ = (N + a_r) / (E + b_r)
+    posterior mean = (N + a_r) / (E + b_r)
 
-Exposure is rider-hours: overtaking is a temporal arrival process, and time-at-risk was
-the best offset of the three tested (traversals / rider-km / rider-hours) on held-out
-Poisson deviance — see cross_val_exposure() below. task5a_diagnostics.exposure_unit_choice()
-reaches the same answer from in-sample AIC, dispersion and a proportionality test, and
-carries the mechanism: rate_per_km = rate_per_hour / speed, so a per-km rate is inflated
-wherever riders are slow rather than where they are in danger.
+So a well-ridden edge keeps close to its own rate and a thin one falls back on its type.
+Quality is measured out of sample, on train/test splits of rides, by held-out Poisson
+deviance.
 
-The regime prior is estimated from the training data by method of moments.
-Prediction quality is evaluated out of sample by train/test ride splits using held-out Poisson deviance.
+Writes to output/task5_risk/:
+  task5b_edge_risk.csv        per-edge rate, 95% interval, shrink weight
+  task5b_regime_prior.csv     the fitted prior per street type
+  task5b_cv_performance.csv   held-out deviance against the simpler baselines
+  task5b_exposure_units.csv   the same model scored under each candidate exposure
+plus three figures to output/figures/.
 """
 
 from pathlib import Path
@@ -44,6 +40,11 @@ TRAV = BASE / "output/task4_oracle/task4_edge_traversals.csv"
 EVENTS = BASE / "output/task4_oracle/task4_edge_events.csv"
 OUT = BASE / "output/task5_risk"
 FIG = BASE / "output/figures"
+
+BLUE, RED = "blue", "red"           # primary / accent
+INK, MUTED = "black", "dimgrey"     # text / secondary
+plt.rcParams.update({"font.size": 11, "text.color": INK,
+                     "figure.facecolor": "white", "savefig.facecolor": "white"})
 
 # Prior-estimation safeguards, all on the Gamma SHAPE a_r = 1/cv², which is dimensionless.
 # (b_r carries the exposure unit, so clipping it would silently re-tune the model whenever
@@ -282,10 +283,10 @@ def fig_uncertainty(streets, eb):
 
     fig, ax = plt.subplots(figsize=(6, 3))
     ax.hist(np.clip(width, 0, hi), bins=50, alpha=0.85)
-    ax.axvline(med, color="red", lw=1.5, ls="--")
-    ax.text(med, ax.get_ylim()[1] * 0.92, f"  median width {med:.1f}", color="red", fontsize=9)
-    ax.axvline(rate_med, color="0.4", lw=1.2, ls=":")
-    ax.text(rate_med, ax.get_ylim()[1] * 0.75, f"  median posterior rate {rate_med:.1f}", color="0.4", fontsize=9)
+    ax.axvline(med, color=RED, lw=1.5, ls="--")
+    ax.text(med, ax.get_ylim()[1] * 0.92, f"  median width {med:.1f}", color=RED, fontsize=9)
+    ax.axvline(rate_med, color=MUTED, lw=1.2, ls=":")
+    ax.text(rate_med, ax.get_ylim()[1] * 0.75, f"  median posterior rate {rate_med:.1f}", color=MUTED, fontsize=9)
     ax.set_xlim(0, hi)
     ax.set_xlabel("95% posterior interval width (per rider-hour)")
     ax.set_ylabel("number of edges")
@@ -314,17 +315,17 @@ def fig_shrinkage(streets, eb, prior):
     ax.scatter(raw, post, s=size, alpha=0.4, edgecolors="none",
                c=obs["edge_class"].map(colors).tolist())
     lim = float(np.percentile(raw, 98)) or 1.0
-    ax.plot([0, lim], [0, lim], "--", lw=1, color="0.3")
+    ax.plot([0, lim], [0, lim], "--", lw=1, color=MUTED)
     ax.set_xlim(0, lim)
     ax.set_ylim(0, float(np.percentile(post, 99)) * 1.05)
     ax.set_xlabel("raw edge rate  N / E   (per rider-hour)")
     ax.set_ylabel("Empirical-Bayes posterior rate")
     ax.set_title("Shrinkage toward the street-type rate")
     ax.text(0.98, 0.03, "dot size ∝ exposure", transform=ax.transAxes,
-            ha="right", va="bottom", fontsize=8, color="0.5")
+            ha="right", va="bottom", fontsize=8, color=MUTED)
 
     handles = [Line2D([], [], marker="o", ls="", color=colors[r], label=r.replace("_", " ")) for r in regimes]
-    handles.append(Line2D([], [], ls="--", color="0.3", label="no shrinkage (y=x)"))
+    handles.append(Line2D([], [], ls="--", color=MUTED, label="no shrinkage (y=x)"))
     ax.legend(handles=handles, loc="center left", bbox_to_anchor=(1.02, 0.5),
               fontsize=8, frameon=False)
     ax.spines[["top", "right"]].set_visible(False)
@@ -351,10 +352,10 @@ def fig_regime_caterpillar(prior):
     y = np.arange(len(reg))
 
     fig, ax = plt.subplots(figsize=(7, 4.5))
-    ax.hlines(y, reg["lo"], reg["hi"], color="#2a78d6", lw=2, alpha=0.6)
-    ax.plot(reg["rate_eb"], y, "o", color="#2a78d6", ms=6)
-    ax.axvline(gr, color="0.5", ls=":", lw=1)
-    ax.text(gr, len(reg) - 0.4, f" overall {gr:.1f}", color="0.5", fontsize=8, va="top")
+    ax.hlines(y, reg["lo"], reg["hi"], color=BLUE, lw=2, alpha=0.6)
+    ax.plot(reg["rate_eb"], y, "o", color=BLUE, ms=6)
+    ax.axvline(gr, color=MUTED, ls=":", lw=1)
+    ax.text(gr, len(reg) - 0.4, f" overall {gr:.1f}", color=MUTED, fontsize=8, va="top")
     ax.set_yticks(y)
     ax.set_yticklabels([f"{r.replace('_', ' ')}  (n={n})"
                         for r, n in zip(reg["edge_class"], reg["n_events"])], fontsize=9)
@@ -364,7 +365,7 @@ def fig_regime_caterpillar(prior):
         ax.text(0.98, 0.03, "excluded (<%d overtakes): %s" % (
             MIN_EVENTS, ", ".join(f"{r.edge_class.replace('_', ' ')} n={r.n_events}"
                                   for r in dropped.itertuples())),
-                transform=ax.transAxes, ha="right", va="bottom", fontsize=7.5, color="0.5")
+                transform=ax.transAxes, ha="right", va="bottom", fontsize=7.5, color=MUTED)
     ax.spines[["top", "right"]].set_visible(False)
     fig.tight_layout()
     fig.savefig(FIG / "task5b_regime_caterpillar.png", dpi=150, bbox_inches="tight")

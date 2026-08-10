@@ -1,24 +1,22 @@
-"""Acquire and classify the cyclable street network of Münster, then attach the static
-per-edge covariates the risk model screens.
+"""Build the street network and attach its static covariates, in one pass.
 
-Two stages, one pass over the network:
-  1. the network — download (cached), flag sidepaths, assign a riding regime per edge
-  2. the covariates — length, speed limit, lanes, betweenness, accident counts, AADT
+The network: download Muenster's cyclable graph from OSM (cached), flag sidepaths, and
+give every edge one of 11 riding regimes.
 
-Stage 2 runs on the graph and the classified edges already in memory, and is the SLOW
-step (approximate betweenness over ~90k edges), so it is cached like the download:
-delete input/muenster_edge_covariates.csv to recompute.
+The covariates: length, speed limit, lanes, betweenness, accident counts and AADT,
+computed from the graph and the classified edges already in memory. This is the slow half,
+so it is cached; delete the covariates CSV to recompute.
 
-Betweenness is EXPLORATORY, not a clean AADT stand-in: it is estimated from
-BETWEENNESS_SAMPLES sampled source nodes, and it is confounded — high-betweenness
-arterials in Münster mostly carry SEPARATED cycle tracks, so it ends up negatively
-associated with the overtake rate, the opposite of the causal expectation. It does not
-enter the Task-5 risk model; it appears only in the descriptive forest plots.
+Betweenness is exploratory, not a stand-in for AADT. It is sampled rather than exact, and
+confounded: Muenster's high-betweenness arterials mostly carry separated cycle tracks, so
+it ends up negatively associated with the overtake rate. It stays out of the risk model.
 
-Accidents come from the Unfallatlas (police-reported injury accidents, already in
-EPSG:25832) in input/accidents/; AADT from Straßen.NRW in input/traffic/. Neither has a
-direction, so both are joined to a street via the undirected key (u_lo, v_hi) and
-replicated to both directions.
+Accidents (Unfallatlas) and AADT (Strassen.NRW) have no direction, so both are joined per
+street on (u_lo, v_hi) and copied to both directions.
+
+Writes to input/:
+  muenster_edges_classified.gpkg   every edge with its riding regime
+  muenster_edge_covariates.csv     one row per directed edge
 """
 from pathlib import Path
 import re
@@ -41,6 +39,11 @@ PLOT_PATH = Path("output/task1_network/task1_network_overview.png")
 INSPECT_DIR = Path("output/task1_network/task1_inspection")
 
 CRS_METRIC = "EPSG:25832"  # UTM 32N
+
+BLUE, RED = "blue", "red"           # primary / accent
+INK, MUTED = "black", "dimgrey"     # text / secondary
+plt.rcParams.update({"font.size": 11, "text.color": INK,
+                     "figure.facecolor": "white", "savefig.facecolor": "white"})
 
 # AADT snapping. Straßen.NRW only publishes counts for federal/state/county roads
 # (B/L/K), so most municipal streets get no value -- that is a property of the

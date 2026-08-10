@@ -1,20 +1,18 @@
-"""Map-match the kept rides to the street network and pin events onto edges.
+"""Map-match the kept rides onto the street network and pin events onto edges.
 
-Each ride is matched as an ordered path (Leuven HMM)
-IN TRAVEL ORDER -- direction is preserved from here to the oracle.
-Every event inherits the edge of its anchor point (falling back to its first/last
-point); where several classified edges share a node pair (road vs parallel
-sidepath, multigraph keys), the class comes from the geometry nearest the event.
+Each ride is matched as an ordered path (Leuven HMM) in travel order, so direction is
+preserved from here to the oracle. Every event inherits the edge of its anchor point,
+falling back to its first or last. Where several classified edges share a node pair, a road
+and its parallel sidepath for instance, the class comes from the geometry nearest the event.
 
-Run AFTER task2b_overtake_events.py. If matched files already exist,
-matching is skipped (delete them to force a re-match).
+Matching is skipped if the matched files already exist; delete them to force a re-match.
 
 Writes to output/task3_matching/:
-  task3_matched_points.gpkg   points with matched edge (u, v), travel order
-  task3_matched_events.gpkg   events with edge (u, v) + edge_class + link_via
-  task3_match_summary.csv     match/link/direction descriptives (for slides)
-  task3_matched_per_box/      one validation page per box
-and the coverage map for this stage to output/figures/.
+  task3_matched_points.gpkg    points with their matched edge (u, v), in travel order
+  task3_matched_events.gpkg    events with edge, edge_class and link_via
+  task3_match_summary.csv      match, link and direction descriptives
+  task3_matched_per_box/       one validation page per box
+plus the coverage map to output/figures/.
 """
 from pathlib import Path
 import logging
@@ -51,8 +49,10 @@ MIN_PROB_NORM = 0.001
 
 VALUE_VMAX = 250  # clearance scale cap for point sizing
 
-INK, NET = "#0b0b0b", "#d9d9d6"
-RIDE, EVENT = "#2a78d6", "#e34948"
+BLUE, RED = "blue", "red"           # primary / accent
+INK, NET = "black", "lightgrey"     # text / background network
+plt.rcParams.update({"font.size": 11, "text.color": INK,
+                     "figure.facecolor": "white", "savefig.facecolor": "white"})
 
 
 def build_inmem_map(graph_path=GRAPH_PATH):
@@ -328,8 +328,8 @@ def fig_coverage_map(matched_points, matched_events):
 
     fig, ax = plt.subplots(figsize=(11, 11))
     edges.plot(ax=ax, color=NET, linewidth=0.4, zorder=0)
-    lines.plot(ax=ax, color=RIDE, linewidth=0.55, alpha=0.35, zorder=1)
-    matched_events.plot(ax=ax, color=EVENT, markersize=7, alpha=0.55,
+    lines.plot(ax=ax, color=BLUE, linewidth=0.55, alpha=0.35, zorder=1)
+    matched_events.plot(ax=ax, color=RED, markersize=7, alpha=0.55,
                         edgecolor="white", linewidth=0.2, zorder=2)
     ax.set_xlim(xlo - pad, xhi + pad)
     ax.set_ylim(ylo - pad, yhi + pad)
@@ -338,10 +338,10 @@ def fig_coverage_map(matched_points, matched_events):
 
     handles = [
         Line2D([], [], color=NET, lw=1.8, label="cyclable network"),
-        Line2D([], [], color=RIDE, lw=1.8, alpha=0.7,
+        Line2D([], [], color=BLUE, lw=1.8, alpha=0.7,
                label=f"ridden tracks ({lines['traj_id'].nunique()} rides, "
                      f"{lines.length.sum() / 1000:.0f} km)"),
-        Line2D([], [], color=EVENT, marker="o", ls="", markersize=8,
+        Line2D([], [], color=RED, marker="o", ls="", markersize=8,
                markeredgecolor="white", markeredgewidth=0.4,
                label=f"overtake events ({len(matched_events):,})"),
     ]

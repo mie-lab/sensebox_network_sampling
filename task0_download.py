@@ -1,8 +1,10 @@
-"""Download Muenster senseBox:bike overtaking data from openSenseMap.
+"""Download the Muenster senseBox:bike overtaking data from openSenseMap.
 
-Set DOWNLOAD_START / DOWNLOAD_END, then run. One CSV per channel is written to
-input/, named after the date range (overtake distance or maneuver)
-since rows are deduplicated (the API repeats rows).
+Pulls two channels: the measured overtake distance, and the classifier's
+overtaking-manoeuvre probability. Set DOWNLOAD_START / DOWNLOAD_END, then run. The API
+repeats rows, so they are deduplicated here.
+
+Writes one CSV per channel to input/, named after the date range.
 """
 import time
 import urllib.parse

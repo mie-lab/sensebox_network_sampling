@@ -1,45 +1,33 @@
-"""Task 5 — does spatial structure add anything over street type? A model ladder.
+"""Does spatial structure add anything over street type?
 
-Every model predicts a per-edge overtake rate and is scored the same way: held-out
-Poisson deviance on a train/test ride split. The ladder runs from no pooling to a
-spatial field, each rung adding one idea:
+A ladder of estimators, each adding one idea, all scored the same way: held-out Poisson
+deviance on a train/test split of rides.
 
-  raw                 N / E per edge, no pooling
-  regime              street-type mean (full pooling by type)
-  Poisson-Gamma       regime + independent Gamma per-edge shrinkage   (the EB model)
-  spatial L km        regime + a Matern-3/2 GP on edge centroids + a per-edge nugget
-  spatial-only        the same GP with NO regime — a pure location field, on its own
+  raw            N / E per edge, no pooling
+  regime         one rate per street type, full pooling
+  Poisson-Gamma  regime plus independent per-edge shrinkage
+  spatial L km   regime plus a Matern-3/2 GP on edge centroids, with a per-edge nugget
+  spatial-only   the same GP without the regime, a pure location field
 
-The GP kernel carries two terms:
-    k(e,e') = amp * Matern32(distance) + nug * 1[e is the same edge as e']
-The second is the nugget — an independent per-edge effect, the Gaussian twin of what
-Poisson-Gamma does. Without it the field can only borrow from neighbours and is
-structurally unable to let one edge be idiosyncratic, so 'spatial vs Poisson-Gamma'
-would compare space INSTEAD of per-edge shrinkage rather than space ON TOP of it.
-nug=0 stays in the grid, so the model can still choose to be purely spatial.
+The kernel is k(e,e') = amp * Matern32(distance) + nug * 1[same edge]. The nugget is the
+Gaussian twin of what Poisson-Gamma does: without it the field could only borrow from
+neighbours, so the comparison would be space INSTEAD of per-edge shrinkage rather than
+space ON TOP of it. nug = 0 stays in the grid, so the model may still choose to be purely
+spatial. Length-scales run from street scale (0.05 km) to district scale (1 km); at the
+short end the kernel is nearly diagonal, so that row should land near Poisson-Gamma and
+doubles as a sanity check.
 
-The length-scale grid runs from street scale (0.05 km) to district scale (1 km). At the
-short end the kernel is nearly diagonal — almost a pure per-edge effect — so that row
-doubles as a sanity reference: it should land near Poisson-Gamma.
+Train and test edge sets overlap, so a shared edge's nugget is estimated from the training
+rides and must carry into its prediction. That is why the nugget enters the train/test
+cross-covariance too, not only the training diagonal (see _shared_edges).
 
-Test and train edge sets overlap (an edge is usually crossed by both train and test
-rides), so a shared edge's nugget is estimated from the training rides and must carry
-into its prediction — that is why the nugget also enters the train/test cross-covariance
-(see _shared_edges), not just the training diagonal.
+Fitting is by Laplace approximation, which is O(n^3), so the field trains on a subsample of
+N_TRAIN edges. ntrain_sweep() checks the conclusion is not an artefact of that cap.
 
-If a spatial field adds nothing over the per-edge effect alone (spatial ~ Poisson-
-lognormal) yet a spatial field WITHOUT the regime still reaches the regime's accuracy
-(spatial-only ~ regime), then street type already carries the spatial signal.
-
-Spatial choice: Euclidean vs network (shortest-path) distance was tried; network gave no
-gain at a large compute + dependency cost, so a lean Euclidean Matern-3/2 is used.
-Forward/backward edges of a street share a centroid, so travel direction enters as an
-explicit third coordinate (+/-delta), not random jitter. The GP latent is fit by the
-Laplace approximation (Rasmussen & Williams, Alg. 3.1). Because Laplace is O(n^3) the
-field trains on a subsample; ntrain_sweep() checks the conclusion is not an artefact of
-that subsample size (it is ~flat from 800 to 2000 edges).
-
-Run:  python task5c_risk_gp.py
+Writes to output/task5_risk/:
+  task5c_gp_cv.csv       the ladder, held-out deviance per estimator
+  task5c_gp_ntrain.csv   deviance against training subsample size
+plus two figures to output/figures/.
 """
 from pathlib import Path
 
@@ -56,7 +44,8 @@ from task5b_risk_gamma import (DIRECTED_EDGE_KEY, load, make_streets, fit_prior,
 EDGES = Path("input/muenster_edges_classified.gpkg")
 OUT = Path("output/task5_risk")
 FIG = Path("output/figures")
-ACC, ACC2 = "#2a78d6", "#e34948"
+BLUE, RED = "blue", "red"           # primary / accent
+INK, MUTED_BAR = "black", "lightgrey"   # text / de-emphasised bars
 N_TRAIN = 2000                            # GP training edges (exact Laplace is O(n^3); see ntrain_sweep)
 NTRAIN_GRID = [1000, 2000, 3000, 4000]    # subsample sizes for the handicap check
 # Hyper-parameter grid, jointly picked by marginal likelihood. Re-centred on the last
@@ -72,8 +61,8 @@ SPATIAL_LENGTHS = [0.05, 0.1, 0.3, 0.5, 1.0]
 SWEEP_LENGTHS = (0.1, 0.3)             # the two the ntrain sweep re-fits at
 JITTER = 1e-6                          # keeps the Cholesky stable when nug = 0
 RNG = np.random.default_rng(0)
-plt.rcParams.update({"font.size": 11, "figure.facecolor": "white",
-                     "savefig.facecolor": "white"})
+plt.rcParams.update({"font.size": 11, "text.color": INK,
+                     "figure.facecolor": "white", "savefig.facecolor": "white"})
 
 
 def centroids():
@@ -257,7 +246,7 @@ def fig_cv(perf):
     o = perf.drop("raw").sort_values("mean_dev")
     best = o["mean_dev"].idxmin()
     re = {"Poisson-Gamma"}
-    cols = [ACC if n == best else (ACC2 if n in re else "#c9c9c6") for n in o.index]
+    cols = [BLUE if n == best else (RED if n in re else MUTED_BAR) for n in o.index]
 
     fig, ax = plt.subplots(figsize=(8.6, 4.2))
     ax.barh(range(len(o)), o["mean_dev"], xerr=o["sd"], color=cols, alpha=0.95,
@@ -318,8 +307,8 @@ def ntrain_sweep(tr, ev, cls, cents, frac=0.7, reps=6):
 def fig_ntrain(sweep):
     """Spatial-GP deviance vs training size, against the (size-independent) baselines."""
     fig, ax = plt.subplots(figsize=(6.4, 4))
-    ax.plot(sweep["N_train"], sweep["spatial"], "-o", color=ACC, lw=2, ms=7, label="spatial GP")
-    ax.axhline(sweep.attrs["eb"], color=ACC2, ls="--", lw=1.5, label="Poisson-Gamma (EB)")
+    ax.plot(sweep["N_train"], sweep["spatial"], "-o", color=BLUE, lw=2, ms=7, label="spatial GP")
+    ax.axhline(sweep.attrs["eb"], color=RED, ls="--", lw=1.5, label="Poisson-Gamma (EB)")
     ax.axhline(sweep.attrs["regime"], color="0.5", ls=":", lw=1.5, label="street-type mean")
     ax.set_xlabel("GP training edges  (N_train)")
     ax.set_ylabel("held-out Poisson deviance")

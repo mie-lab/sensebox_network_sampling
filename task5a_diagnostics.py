@@ -1,19 +1,18 @@
-"""Task 5 diagnostics — the evidence behind the model choices.
+"""The evidence behind the Task 5 model choices.
 
 Every function here answers "why is the estimator built this way?", not "what is in the
-data" — the descriptive side lives in task4_oracle.py, next to the tables it describes.
+data". The descriptive side lives in task4_oracle.py, next to the tables it describes.
 
   exposure_unit_choice()     why rider-hours and not traversals or rider-km
-  rider_dominance()          a few boxes drive the estimate -> clustered CI (~6x wider)
-  regime_dispersion()        overdispersion per street type (the sampling-budget knob)
-  temporal_drift()           does each regime's rate drift between years? (clustered RR)
-  poisson_vs_nb()            does the negative binomial beat Poisson? (AIC)
-  covariate_adjustment()     covariate effects, marginal vs regime-adjusted
-  covariate_correlation()    do static covariates predict the rate? (heatmap)
-  moran_by_threshold()       residual spatial autocorrelation vs. exposure threshold
+  rider_dominance()          a few boxes drive the estimate, so intervals need clustering
+  regime_dispersion()        overdispersion per street type, the sampling-budget knob
+  temporal_drift()           does each regime's rate drift between years?
+  poisson_vs_nb()            does the negative binomial beat Poisson?
+  covariate_adjustment()     covariate effects, marginal against regime-adjusted
+  covariate_correlation()    do static covariates predict the rate?
+  moran_by_threshold()       residual spatial autocorrelation as coverage improves
 
-Tables -> output/task5_diagnostics/ ,  figures -> output/figures/.
-Run from an activated env:   python task5a_diagnostics.py
+Tables go to output/task5_diagnostics/, figures to output/figures/.
 """
 import sys
 from itertools import combinations
@@ -33,10 +32,11 @@ EVENTS = BASE / "output/task4_oracle/task4_edge_events.csv"
 OUT = BASE / "output/task5_diagnostics"
 FIG = BASE / "output/figures"
 
-INK, MUTED, ACC, ACC2 = "#0b0b0b", "#52514e", "#2a78d6", "#e34948"
+INK, MUTED = "black", "dimgrey"
+BLUE, RED = "blue", "red"           # primary / accent
 RNG = np.random.default_rng(42)
-plt.rcParams.update({"font.size": 11, "figure.facecolor": "white",
-                     "savefig.facecolor": "white"})
+plt.rcParams.update({"font.size": 11, "text.color": INK,
+                     "figure.facecolor": "white", "savefig.facecolor": "white"})
 
 
 def _setup():
@@ -133,7 +133,7 @@ def temporal_drift(n_windows=2, min_events=10):
     fig, ax = plt.subplots(figsize=(8.4, 0.5 * len(d) + 1.6))
     y = np.arange(len(d))
     for i, r in enumerate(d.itertuples()):
-        col = ACC2 if r.drift else MUTED
+        col = RED if r.drift else MUTED
         ax.plot([r.lo, r.hi], [i, i], color=col, lw=2.2, alpha=0.6,
                 solid_capstyle="round")
         ax.plot(r.rr, i, "o", color=col, ms=7)
@@ -146,7 +146,7 @@ def temporal_drift(n_windows=2, min_events=10):
     ax.set_xticks([0.25, 0.5, 1, 2, 4])
     ax.set_xticklabels(["¼×", "½×", "1× (no drift)", "2×", "4×"])
     ax.set_xlabel("window-2 ÷ window-1 overtake-rate ratio  (95% rider-clustered CI)")
-    ax.plot([], [], "o", color=ACC2, label="drift detected (CI excludes 1)")
+    ax.plot([], [], "o", color=RED, label="drift detected (CI excludes 1)")
     ax.plot([], [], "o", color=MUTED, label="no drift detected")
     # above the axes: the widest CI (thin regimes) runs to the far right of the bottom rows
     ax.legend(loc="lower left", bbox_to_anchor=(0, 1.0), ncol=2, fontsize=8.5, frameon=False)
@@ -211,7 +211,7 @@ def rider_dominance(n_boot=3000):
     fig, ax = plt.subplots(figsize=(8.5, 2.6))
     ax.errorbar(rate, 1, xerr=[[rate - nlo], [nhi - rate]], fmt="o", color=MUTED,
                 capsize=4, ms=8, lw=2, label="naive Poisson (events independent)")
-    ax.errorbar(rate, 0, xerr=[[rate - clo], [chi - rate]], fmt="o", color=ACC2,
+    ax.errorbar(rate, 0, xerr=[[rate - clo], [chi - rate]], fmt="o", color=RED,
                 capsize=4, ms=8, lw=2, label="rider-clustered bootstrap")
     ax.set_yticks([0, 1])
     ax.set_yticklabels(["clustered", "naive"])
@@ -319,9 +319,9 @@ def covariate_adjustment():
         ax.plot([r.lo_m, r.hi_m], [i + 0.16] * 2, color=MUTED, lw=2, alpha=0.5,
                 solid_capstyle="round")
         ax.plot(r.rr_marginal, i + 0.16, "o", color=MUTED, ms=8)
-        ax.plot([r.lo_a, r.hi_a], [i - 0.16] * 2, color=ACC, lw=2, alpha=0.6,
+        ax.plot([r.lo_a, r.hi_a], [i - 0.16] * 2, color=BLUE, lw=2, alpha=0.6,
                 solid_capstyle="round")
-        ax.plot(r.rr_adjusted, i - 0.16, "o", color=ACC, ms=8)
+        ax.plot(r.rr_adjusted, i - 0.16, "o", color=BLUE, ms=8)
     ax.axvline(1, color=INK, ls="--", lw=1)
     ax.set_yticks(y)
     ax.set_yticklabels([r.covariate for r in df.itertuples()], fontsize=10)
@@ -333,7 +333,7 @@ def covariate_adjustment():
     ax.xaxis.set_minor_formatter(plt.NullFormatter())
     ax.set_xlabel("overtake rate-ratio  (log scale)")
     ax.plot([], [], "o", color=MUTED, label="marginal (univariate, confounded by regime)")
-    ax.plot([], [], "o", color=ACC, label="adjusted for regime (partial effect)")
+    ax.plot([], [], "o", color=BLUE, label="adjusted for regime (partial effect)")
     ax.legend(loc="lower right", fontsize=9, frameon=False)
     ax.set_title("Covariates are second-order and regime-collinear, not 'flat'\n"
                  "adjusting for regime: accidents & speed wash out; betweenness stays "
@@ -517,11 +517,11 @@ def regime_dispersion():
     _write(df, "task5a_regime_dispersion.csv")
 
     fig, ax = plt.subplots(figsize=(8.5, 0.5 * len(df) + 1.4))
-    ax.barh(range(len(df)), df["dispersion"], color=ACC, alpha=0.85)
+    ax.barh(range(len(df)), df["dispersion"], color=BLUE, alpha=0.85)
     ax.axvline(1, color=MUTED, ls="--", lw=1.2)
     ax.text(1, len(df) - 0.3, " Poisson (=1)", color=MUTED, fontsize=9, va="center")
-    ax.axvline(pooled, color=ACC2, ls=":", lw=1.5)
-    ax.text(pooled, -0.7, f"pooled {pooled:.1f}", color=ACC2, fontsize=9, ha="center")
+    ax.axvline(pooled, color=RED, ls=":", lw=1.5)
+    ax.text(pooled, -0.7, f"pooled {pooled:.1f}", color=RED, fontsize=9, ha="center")
     ax.set_yticks(range(len(df)))
     ax.set_yticklabels([f"{r.regime.replace('_', ' ')}  (n={r.events})"
                         for r in df.itertuples()])
@@ -563,7 +563,7 @@ def exposure_unit_choice(n_bins=10):
 
     units = {"per traversal": "n_traversals", "per rider-km": "rider_km",
              "per rider-hour": "rider_h"}
-    cols = {"per traversal": MUTED, "per rider-km": ACC2, "per rider-hour": ACC}
+    cols = {"per traversal": MUTED, "per rider-km": RED, "per rider-hour": BLUE}
 
     o = pd.read_csv(ORACLE)
     d = o[o["is_observed"] & (o["rider_km"] > 0) & (o["rider_h"] > 0)].copy()
@@ -621,8 +621,8 @@ def exposure_unit_choice(n_bins=10):
 
     y = np.arange(len(reg))
     ax2.hlines(y, reg["rel_km"], reg["rel_hr"], color="0.82", lw=2.5, zorder=1)
-    ax2.scatter(reg["rel_km"], y, color=ACC2, s=45, zorder=3, label="per rider-km")
-    ax2.scatter(reg["rel_hr"], y, color=ACC, s=45, zorder=3, label="per rider-hour")
+    ax2.scatter(reg["rel_km"], y, color=RED, s=45, zorder=3, label="per rider-km")
+    ax2.scatter(reg["rel_hr"], y, color=BLUE, s=45, zorder=3, label="per rider-hour")
     ax2.axvline(1, color=INK, ls="--", lw=1)
     ax2.set_yticks(y)
     ax2.set_yticklabels([f"{r.replace('_', ' ')}  ({s:.0f} km/h)"
