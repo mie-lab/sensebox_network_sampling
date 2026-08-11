@@ -44,7 +44,7 @@ def _fetch_month(phenomenon, month_start, month_end):
         try:
             with urllib.request.urlopen(url, timeout=180) as r:
                 df = pd.read_csv(r)
-            print(f"  {month}  {len(df): >7} rows")
+            print(f"  {month}  {len(df):>7} rows")
             return df
         except Exception as e:
             print(f"  {month}  attempt {attempt}/{MAX_ATTEMPTS} failed: {e}")
@@ -64,8 +64,8 @@ def _month_windows(start, end):
 def main():
     for phenomenon in PHENOMENA:
         slug = phenomenon.lower().replace(" ", "_")
-        out_path = Path(f"input/muenster_{slug}_{DOWNLOAD_START: %Y-%m}_{DOWNLOAD_END: %Y-%m}.csv")
-        print(f"\n=== {phenomenon} {DOWNLOAD_START: %Y-%m-%d}-{DOWNLOAD_END: %Y-%m-%d} ===")
+        out_path = Path(f"input/muenster_{slug}_{DOWNLOAD_START:%Y-%m}_{DOWNLOAD_END:%Y-%m}.csv")
+        print(f"\n=== {phenomenon} {DOWNLOAD_START:%Y-%m-%d}-{DOWNLOAD_END:%Y-%m-%d} ===")
 
         monthly = [_fetch_month(phenomenon, month_start, month_end)
                    for month_start, month_end in _month_windows(DOWNLOAD_START, DOWNLOAD_END)]
