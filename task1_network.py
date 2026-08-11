@@ -11,7 +11,7 @@ directions (!!!).
 Writes to input/:
   muenster_edges_classified.gpkg   every edge with its riding regime
   muenster_edge_covariates.csv     one row per directed edge
-and to output/task1_network/task1_inspection/: the classification audit and its figures.
+and to output/task1_network/: the classification audit and its figures.
 """
 
 from pathlib import Path
@@ -31,7 +31,7 @@ EDGES_PATH = Path("input/muenster_edges_classified.gpkg")
 COVARIATES_CSV = Path("input/muenster_edge_covariates.csv")
 ACCIDENT_DIR = Path("input/accidents")
 TRAFFIC_ZIP = Path("input/traffic/Verkehrswerte.zip")
-INSPECT_DIR = Path("output/task1_network/task1_inspection")
+OUT_DIR = Path("output/task1_network")
 
 CRS_METRIC = "EPSG:25832"  # UTM 32N
 
@@ -46,6 +46,12 @@ ACCIDENT_SNAP_M = 30          # furthest an accident may sit from its edge. 2026
 ACCIDENT_RECENT_FROM = 2024
 
 SEPARATED_HIGHWAY = {"cycleway", "path", "footway"}
+
+# Cut wherever a tag the classifier or the covariates read changes.
+# Without this, simplification merges disagreeing ways into one list.
+
+SPLIT_ON = ["highway", "service", "cycleway", "cycleway:left", "cycleway:right",
+            "cycleway:both", "maxspeed", "lanes", "segregated"]
 EXTRA_TAGS = [
     "cycleway", "cycleway:left", "cycleway:right", "cycleway:both",
     "bicycle", "cyclestreet", "bicycle_road",
@@ -65,8 +71,9 @@ def get_graph():
     print("Downloading the cyclable network from OSM...", flush=True)
     G = ox.graph_from_place(
         "Münster, North Rhine-Westphalia, Germany",
-        network_type="bike", simplify=True,
+        network_type="bike", simplify=False,
     )
+    G = ox.simplify_graph(G, edge_attrs_differ=SPLIT_ON)
     G = ox.project_graph(G, to_crs=CRS_METRIC)
     GRAPH_PATH.parent.mkdir(exist_ok=True)
     ox.save_graphml(G, GRAPH_PATH)
@@ -77,8 +84,8 @@ def get_graph():
 
 def _norm(name, e):
     """One OSM tag as a plain string Series: no NaN, no lists, safe to compare.
-    Merged ways can disagree on a tag; the first non-negative value wins.
-    A tag that was never downloaded returns empty, so it matches nothing.
+    Merged ways can still disagree on tags other than highway; the first non-negative
+    value wins. A tag never downloaded returns empty, so it matches nothing.
     """
     if name not in e.columns:
         return pd.Series("", index=e.index)
@@ -153,7 +160,8 @@ def classify_edge_type(edges):
     which decides 2% of edges; the other 98% match a single rule.
     """
     e = edges.copy()
-    hw, svc, name = _norm("highway", e), _norm("service", e), _norm("name", e)
+    hw = _norm("highway", e)
+    svc, name = _norm("service", e), _norm("name", e)
     cw = pd.concat(
         [_norm(t, e) for t in
          ["cycleway", "cycleway:left", "cycleway:right", "cycleway:both"]],
@@ -163,7 +171,8 @@ def classify_edge_type(edges):
     TRACK_VALS = {"track", "opposite_track"}
     MAIN = {"primary", "primary_link", "secondary", "secondary_link",
             "tertiary", "tertiary_link", "trunk", "trunk_link"}  # unclassified not here. To think whether include.
-    ACCESS_VALS = {"driveway", "parking_aisle", "alley"}
+    # service sub-tags that mean destination-only; service road mean through route;
+    ACCESS_VALS = {"driveway", "parking_aisle", "alley", "drive-through", "emergency_access", "slipway"}
 
     sidepath = e["is_sidepath"]
 
@@ -199,7 +208,7 @@ def classify_edge_type(edges):
 # ========= inspection =========
 
 
-def inspect_classification(edges, column="edge_class", out_dir=INSPECT_DIR):
+def inspect_classification(edges, column="edge_class", out_dir=OUT_DIR):
     """Diagnostics: how raw OSM tags were transformed into edge classes."""
     out_dir.mkdir(parents=True, exist_ok=True)
     e = edges
@@ -222,10 +231,11 @@ def inspect_classification(edges, column="edge_class", out_dir=INSPECT_DIR):
         overlap.to_csv(out_dir / "task1_condition_overlap.csv")
         print(f"[csv] saved -> {out_dir / 'task1_condition_overlap.csv'}")
 
-    n_other = (e[column] == "other").sum()          # anything here means a rule is missing
+    n_other = (e[column] == "other").sum()  # anything here means a rule is missing
     print(f"\nedges classified 'other': {n_other}")
     if n_other:
-        print(_norm("highway", e)[e[column] == "other"].value_counts().head(10).to_string())
+        print(_norm("highway", e)[e[column] == "other"]
+              .value_counts().head(10).to_string())
 
     print(f"sidepath-flagged edges: {e['is_sidepath'].sum()} ({e['is_sidepath'].mean():.1%})")
 
@@ -250,7 +260,7 @@ def _save(fig, path):
     print(f"[fig] saved -> {path}")
 
 
-def fig_class_small_multiples(edges, column="edge_class", out_dir=INSPECT_DIR, ncols=4, min_edges=10):
+def fig_class_small_multiples(edges, column="edge_class", out_dir=OUT_DIR, ncols=4, min_edges=10):
     """One panel per regime, the rest of the network greyed behind it."""
     km = edges.groupby(column)["length"].sum() / 1000
     cats = [c for c in edges[column].value_counts().index
@@ -268,7 +278,7 @@ def fig_class_small_multiples(edges, column="edge_class", out_dir=INSPECT_DIR, n
     _save(fig, out_dir / "task1_labels_small_multiples.png")
 
 
-def fig_network_overview(edges, column="edge_class", out_dir=INSPECT_DIR):
+def fig_network_overview(edges, column="edge_class", out_dir=OUT_DIR):
     """The whole network, coloured by riding regime."""
     # sorted, so a regime keeps its colour between runs.
     colors = dict(zip(sorted(edges[column].unique()), plt.get_cmap("tab20").colors))
@@ -396,7 +406,7 @@ def aadt_per_edge(edges_geom, path=TRAFFIC_ZIP, max_dist=AADT_SNAP_M, max_angle=
         max_distance=max_dist, how="inner")
     matched = matched[~matched.index.duplicated(keep="first")]
 
-    # a street merely crossing a counted road must not inherit its traffic
+    # a street crossing a counted road must not inherit its traffic
     matched = matched[_angle_between(matched["edge_bearing"], matched["count_bearing"]) <= max_angle]
 
     print(f"AADT: {len(matched)}/{len(edge_points)} edges matched within {max_dist} m")
