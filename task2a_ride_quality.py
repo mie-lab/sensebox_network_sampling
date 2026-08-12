@@ -1,85 +1,88 @@
-"""Build clean rides from the raw points, and decide which of them are usable.
+"""Cut the raw points into rides, and decide which rides are usable.
 
-Intake: load the distance channel, drop mislabelled and duplicate rows, join the
-manoeuvre-classifier channel on (box, timestamp), clip to the network area, cut into rides
-on gaps over 10 minutes, and give every point a stable id.
-
-A ride is dropped when the distance readings barely vary (sensor blocked), the classifier
-channel is missing (overtakes uncountable), the mean speed is not cycling (under 3 or over
-40 km/h), or the ride is too short to use (under 5 points or 0.2 km). Zero flags means keep.
+A ride is dropped on any of four flags: blocked distance sensor, missing classifier
+channel, non-cycling speed, or too short to measure a rate on.
 
 Writes to output/task2_diagnostics/:
-  task2a_segmented_points.gpkg     all rides' points, read directly by task 2b
+  task2a_segmented_points.gpkg     every point with its ride id, read by task 2b
   task2a_trajectory_quality.csv    one row per ride: stats, flags, keep verdict
   task2a_diagnostics_summary.csv   headline numbers and threshold sensitivity
-  task2a_box_overview.png          plus one map per box, for eyeballing
+  task2a_per_box/                  one page per box, one panel per ride
 """
+
+from collections import namedtuple
 from pathlib import Path
 import re
 
 import geopandas as gpd
+import matplotlib.pyplot as plt
 import numpy as np
 import osmnx as ox
 import pandas as pd
-import matplotlib.pyplot as plt
 from shapely.geometry import LineString
 
-from task1_network import GRAPH_PATH   # the graph is a task-1 artifact; one definition
+from task1_network import GRAPH_PATH
 
-CRS_WGS84 = "EPSG:4326"
-CRS_METRIC = "EPSG:25832"            # UTM 32N, same as the network graph
-
-BOX_ID_COL = "boxId"
-
-BLUE, RED = "blue", "red"           # primary / accent
-INK, MUTED = "black", "dimgrey"     # text / secondary
-plt.rcParams.update({"font.size": 11, "text.color": INK,
-                     "figure.facecolor": "white", "savefig.facecolor": "white"})
-
-INPUT_CSV = Path("input/muenster_overtaking_distance_2024-07_2026-07.csv")
-MANOEUVRE_CSV = Path("input/muenster_overtaking_manoeuvre_2024-07_2026-07.csv")
+DISTANCE_CSV = Path("input/muenster_overtaking_distance_2024-08_2026-08.csv")
+MANOEUVRE_CSV = Path("input/muenster_overtaking_manoeuvre_2024-08_2026-08.csv")
 
 OUT_DIR = Path("output/task2_diagnostics")
 SEG_POINTS_PATH = OUT_DIR / "task2a_segmented_points.gpkg"
 QUALITY_CSV = OUT_DIR / "task2a_trajectory_quality.csv"
 SUMMARY_CSV = OUT_DIR / "task2a_diagnostics_summary.csv"
-OVERVIEW_PATH = OUT_DIR / "task2a_box_overview.png"
 PER_BOX_DIR = OUT_DIR / "task2a_per_box"
 
-BBOX_PAD_M = 2000
-GAP_MINUTES = 10           # silence longer than this starts a new ride
-MIN_POINTS = 5
-MAN_P_TAU = 0.5            # classifier probability gate; sensitivity: 0.2 / 0.8
+CRS_WGS84 = "EPSG:4326"
+CRS_METRIC = "EPSG:25832"    # UTM 32N, same as the network graph
+BOX_ID_COL = "boxId"
 
-SPEED_MIN_KMH = 3.0
-SPEED_MAX_KMH = 40.0
-STUCK_VARIATION_CM = 3     # readings varying less than the sensor's own noise = blocked sensor
-STUCK_MIN_NONZERO = 20     # only judge variation when there are enough nonzero readings
-MAN_MISSING_MAX = 0.5      # >50% of points without a manoeuvre reading -> events not measurable
+BBOX_PAD_M = 2000
+GAP_MINUTES = 5
+MIN_POINTS = 5
+MAN_P_TAU = 0.5
+
+# thresholds of the four drop rules
+SPEED_MIN_KMH, SPEED_MAX_KMH = 3.0, 40.0
+STUCK_MIN_NONZERO = 20
+STUCK_VARIATION_CM = 5
+STUCK_IN_RANGE_MIN = 0.9
+MAN_MISSING_MAX = 0.5
 MIN_LENGTH_KM = 0.2
+
 FLAG_COLS = ["f_speed", "f_stuck", "f_no_manoeuvre", "f_too_short"]
 
+# one probe pair per threshold, looser first.
+Rule = namedtuple("Rule", "flag kwarg loose strict")
+RULES = [
+    Rule("f_speed", "speed", (2, 50), (5, 30)),
+    Rule("f_stuck", "min_nonzero", 40, 10),
+    Rule("f_stuck", "var", 3, 8),
+    Rule("f_stuck", "in_range", 0.99, 0.8),
+    Rule("f_no_manoeuvre", "miss", 0.9, 0.3),
+    Rule("f_too_short", "min_km", 0.1, 0.5),
+]
+
 VALUE_VMIN, VALUE_VMAX = 0, 250
-CMAP = "viridis"
 
 
-# ---------------------------------------------------------------- intake
+# ========= load sensor data =========
+
 
 def bbox_from_graph(graph_path=GRAPH_PATH, pad_m=BBOX_PAD_M):
+    """The network's own extent, padded, so a ride may stray outside the city."""
     G = ox.load_graphml(graph_path)
     nodes, _ = ox.graph_to_gdfs(G)
     minx, miny, maxx, maxy = nodes.total_bounds
     return (minx - pad_m, miny - pad_m, maxx + pad_m, maxy + pad_m)
 
 
-def load_points(csv_path=INPUT_CSV, bbox=None):
+def load_distance_channel(bbox, csv_path=DISTANCE_CSV):
+    """The Overtaking Distance channel as points, clipped to bbox and ordered per box in time."""
     df = pd.read_csv(csv_path)
-    if "unit" in df.columns:         # a few boxes report a mislabeled '%' phenomenon here
-        n = len(df)
-        df = df[df["unit"] == "cm"]
-        if n - len(df):
-            print(f"[load] dropped {n - len(df)} non-cm rows")
-    df = df.drop_duplicates()        # the bulk-download endpoint returns duplicated rows
+    n_raw = len(df)
+
+    # one box labels every reading '%'; its values match the cm distribution but we drop it.
+    df = df[df["unit"] == "cm"]
     df["createdAt"] = pd.to_datetime(df["createdAt"], utc=True)
     df["value"] = pd.to_numeric(df["value"], errors="coerce")
     df = df.dropna(subset=["lat", "lon", "createdAt", BOX_ID_COL])
@@ -88,33 +91,26 @@ def load_points(csv_path=INPUT_CSV, bbox=None):
         df, geometry=gpd.points_from_xy(df["lon"], df["lat"]), crs=CRS_WGS84,
     ).to_crs(CRS_METRIC)
 
-    if bbox is not None:
-        minx, miny, maxx, maxy = bbox
-        n_before = len(gdf)
-        gdf = gdf.cx[minx:maxx, miny:maxy]
-        if n_before - len(gdf):
-            print(f"[load] dropped {n_before - len(gdf)} points outside study area")
-
+    minx, miny, maxx, maxy = bbox
+    gdf = gdf.cx[minx:maxx, miny:maxy]
+    print(f"[load] {n_raw} rows, {len(gdf)} points kept, {n_raw - len(gdf)} removed")
     return gdf.sort_values([BOX_ID_COL, "createdAt"]).reset_index(drop=True)
 
 
-def add_manoeuvre(gdf, manoeuvre_csv=MANOEUVRE_CSV):
-    """Join the Overtaking Manoeuvre channel (0-1 car-pass probability, max-pooled
-    over 2 s by the app) onto the points by (boxId, createdAt); missing -> 0."""
-    m = pd.read_csv(manoeuvre_csv)
+def add_manoeuvre_channel(gdf, csv_path=MANOEUVRE_CSV):
+    """The classifier's 0-1 car-pass probability per point, NaN where it said nothing."""
+    m = pd.read_csv(csv_path)
     m["createdAt"] = pd.to_datetime(m["createdAt"], utc=True)
     m = (m.rename(columns={"value": "man_p"})[[BOX_ID_COL, "createdAt", "man_p"]]
          .drop_duplicates(subset=[BOX_ID_COL, "createdAt"]))
+
     out = gdf.merge(m, on=[BOX_ID_COL, "createdAt"], how="left")
-    out["man_p"] = pd.to_numeric(out["man_p"], errors="coerce")
-    out["man_p_missing"] = out["man_p"].isna()   # no manoeuvre reading at this timestamp
-    out["man_p"] = out["man_p"].fillna(0.0)
-    print(f"[man] {(out['man_p'] > 0).mean():.0%} of points have a nonzero manoeuvre probability "
-          f"({out['man_p_missing'].mean():.0%} missing a reading)")
+    print(f"[load] {out['man_p'].isna().mean():.0%} of points without a manoeuvre reading")
     return gpd.GeoDataFrame(out, geometry="geometry", crs=gdf.crs)
 
 
 def segment_trajectories(gdf, gap_minutes=GAP_MINUTES, min_points=MIN_POINTS):
+    """Cut each box's stream into rides; expects the points sorted per box in time."""
     g = gdf.copy()
     dt = g.groupby(BOX_ID_COL)["createdAt"].diff()
     new_traj = dt.isna() | (dt > pd.Timedelta(minutes=gap_minutes))
@@ -133,219 +129,186 @@ def add_point_id(gdf):
     return g
 
 
-# ---------------------------------------------------------------- quality
-
-def dist_variation_cm(values):
-    """How many cm the nonzero readings typically vary around their usual value
-    (median absolute deviation). Healthy riding: tens of cm (cars, hedges, gaps).
-    Below the sensor's own noise (~3 cm): it stared at one fixed object."""
-    v = np.asarray(values, dtype=float)
-    nz = v[v > 0]
-    if len(nz) == 0:
-        return np.nan
-    return float(np.median(np.abs(nz - np.median(nz))))
+# ========= ride quality =========
 
 
-def per_trajectory_stats(gdf):
-    """One row per ride from raw values + geometry. No events."""
-    def agg(t):
-        t = t.sort_values("createdAt")
-        v = t["value"].to_numpy(dtype=float)
-        pts = t.geometry.values
-        length_km = LineString(pts).length / 1000 if len(pts) >= 2 else 0.0
-        dur_min = (t["createdAt"].max() - t["createdAt"].min()).total_seconds() / 60
+def _dist_variation_cm(values):
+    """Median absolute deviation of the nonzero readings, in cm."""
+    nz = values[values > 0]
+    return float(np.median(np.abs(nz - np.median(nz)))) if len(nz) else np.nan
+
+
+def per_ride_stats(gdf):
+    """One row per ride from raw values + geometry."""
+    def stats(ride):
+        ride = ride.sort_values("createdAt")   # LineString takes the points in row order
+        v = ride["value"].to_numpy(dtype=float)
+        in_range = v > 0
+        length_km = LineString(ride.geometry.values).length / 1000 if len(ride) >= 2 else 0.0
+        dur_h = (ride["createdAt"].max() - ride["createdAt"].min()).total_seconds() / 3600
         return pd.Series({
-            "boxId": t[BOX_ID_COL].iloc[0],
-            "boxName": t["boxName"].iloc[0],
+            "boxId": ride[BOX_ID_COL].iloc[0],
+            "boxName": ride["boxName"].iloc[0],
             "n_points": len(v),
-            "n_nonzero": int((v > 0).sum()),
-            "dist_variation_cm": dist_variation_cm(v),
-            "man_missing_share": t["man_p_missing"].mean(),
-            "n_ot_points": int((t["man_p"] >= MAN_P_TAU).sum()),
+            "n_nonzero": int(in_range.sum()),
+            "in_range_share": float(in_range.mean()),
+            "dist_variation_cm": _dist_variation_cm(v),
+            "man_missing_share": ride["man_p"].isna().mean(),
+            "n_ot_points": int((ride["man_p"] >= MAN_P_TAU).sum()),
             "length_km": length_km,
-            "mean_speed_kmh": length_km / (dur_min / 60) if dur_min > 0 else np.nan,
+            "mean_speed_kmh": length_km / dur_h if dur_h > 0 else np.nan,
         })
 
-    s = gdf.groupby("traj_id", sort=False).apply(agg, include_groups=False).reset_index()
-    usable = s["length_km"].where(s["length_km"] >= MIN_LENGTH_KM)
-    s["ot_per_km"] = s["n_ot_points"] / usable
-    return s
+    rides = gdf.groupby("traj_id", sort=False).apply(stats, include_groups=False).reset_index()
+    usable = rides["length_km"].where(rides["length_km"] >= MIN_LENGTH_KM)  # no rate off a stub
+    rides["ot_per_km"] = rides["n_ot_points"] / usable
+    return rides
 
 
-def build_quality_table(stats):
-    m = stats.copy()
-    m["f_speed"] = (m["mean_speed_kmh"] < SPEED_MIN_KMH) | (m["mean_speed_kmh"] > SPEED_MAX_KMH)
-    m["f_stuck"] = ((m["n_nonzero"] >= STUCK_MIN_NONZERO)
-                    & (m["dist_variation_cm"] < STUCK_VARIATION_CM))
-    m["f_no_manoeuvre"] = m["man_missing_share"] > MAN_MISSING_MAX
-    m["f_too_short"] = (m["n_points"] < MIN_POINTS) | (m["length_km"] < MIN_LENGTH_KM)
+def apply_quality_rules(stats, speed=(SPEED_MIN_KMH, SPEED_MAX_KMH),
+                        min_nonzero=STUCK_MIN_NONZERO,
+                        var=STUCK_VARIATION_CM,
+                        in_range=STUCK_IN_RANGE_MIN,
+                        miss=MAN_MISSING_MAX,
+                        min_km=MIN_LENGTH_KM):
+    """One row per ride, its four flags and the keep verdict. A NaN stat fails every comparison, so it never flags."""
+    q = stats.copy()
+    q["f_speed"] = (q["mean_speed_kmh"] < speed[0]) | (q["mean_speed_kmh"] > speed[1])
+    q["f_stuck"] = ((q["n_nonzero"] >= min_nonzero)
+                    & (q["dist_variation_cm"] < var)
+                    & (q["in_range_share"] >= in_range))
+    q["f_no_manoeuvre"] = q["man_missing_share"] > miss
+    q["f_too_short"] = q["length_km"] < min_km
 
-    m["n_flags"] = m[FLAG_COLS].sum(axis=1)
-    m["flag_reasons"] = m[FLAG_COLS].apply(
+    q["n_flags"] = q[FLAG_COLS].sum(axis=1)
+    q["flag_reasons"] = q[FLAG_COLS].apply(
         lambda r: ",".join(c[2:] for c in FLAG_COLS if r[c]) or "ok", axis=1)
-    m["keep"] = m["n_flags"] == 0
+    q["keep"] = q["n_flags"] == 0
 
     front = ["traj_id", "boxId", "boxName", "keep", "n_flags", "flag_reasons",
              "n_points", "length_km", "mean_speed_kmh",
-             "dist_variation_cm", "man_missing_share", "n_ot_points", "ot_per_km"]
-    rest = [c for c in m.columns if c not in front]
-    return m[front + rest].sort_values(["keep", "n_flags"], ascending=[True, False])
+             "dist_variation_cm", "in_range_share", "man_missing_share",
+             "n_ot_points", "ot_per_km"]
+    rest = [c for c in q.columns if c not in front]
+    return q[front + rest]
 
 
-def diagnostic_summary(q, path=SUMMARY_CSV):
-    """One CSV for slides: headline numbers, per-flag drop counts, and the
-    threshold-sensitivity check (kept counts under loosened/tightened rules)."""
-    def kept(speed=(SPEED_MIN_KMH, SPEED_MAX_KMH), var=STUCK_VARIATION_CM,
-             miss=MAN_MISSING_MAX, min_km=MIN_LENGTH_KM):
-        bad = ((q["mean_speed_kmh"] < speed[0]) | (q["mean_speed_kmh"] > speed[1])
-               | ((q["n_nonzero"] >= STUCK_MIN_NONZERO) & (q["dist_variation_cm"] < var))
-               | (q["man_missing_share"] > miss)
-               | (q["n_points"] < MIN_POINTS) | (q["length_km"] < min_km))
-        return int((~bad).sum())
+def rule_sensitivity(stats, verdicts, path=SUMMARY_CSV):
+    """Headline counts, plus what each threshold is worth: rides kept when it is loosened
+    or tightened, and rides it alone decides."""
+    def judged(**thresholds):
+        return apply_quality_rules(stats, **thresholds)
 
-    k = q[q["keep"]]
+    kept = verdicts[verdicts["keep"]]
     rows = [
-        ("rides total", len(q)),
-        ("rides kept", len(k)),
-        ("rides kept share", f"{q['keep'].mean():.0%}"),
-        ("boxes total", q["boxId"].nunique()),
-        ("boxes with >=1 kept ride", k["boxId"].nunique()),
-        ("km total", round(q["length_km"].sum(), 1)),
-        ("km kept", round(k["length_km"].sum(), 1)),
-        ("dropped: too short/slow ride", int(q["f_too_short"].sum())),
-        ("dropped: implausible speed", int(q["f_speed"].sum())),
-        ("dropped: blocked/stuck distance sensor", int(q["f_stuck"].sum())),
-        ("dropped: no manoeuvre stream (no events measurable)", int(q["f_no_manoeuvre"].sum())),
-        ("sensitivity: speed bounds 2-50 km/h", kept(speed=(2, 50))),
-        ("sensitivity: speed bounds 5-30 km/h", kept(speed=(5, 30))),
-        ("sensitivity: stuck variation < 2 cm", kept(var=2)),
-        ("sensitivity: stuck variation < 5 cm", kept(var=5)),
-        ("sensitivity: classifier missing > 30%", kept(miss=0.3)),
-        ("sensitivity: classifier missing > 70%", kept(miss=0.7)),
-        ("sensitivity: min ride length 0.1 km", kept(min_km=0.1)),
-        ("sensitivity: min ride length 0.5 km", kept(min_km=0.5)),
-        ("sensitivity: all loose", kept(speed=(2, 50), var=2, miss=0.7, min_km=0.1)),
-        ("sensitivity: all strict", kept(speed=(5, 30), var=5, miss=0.3, min_km=0.5)),
+        ("rides total", len(verdicts)),
+        ("rides kept", len(kept)),
+        ("rides kept share", f"{verdicts['keep'].mean():.0%}"),
+        ("boxes total", verdicts["boxId"].nunique()),
+        ("boxes with >=1 kept ride", kept["boxId"].nunique()),
+        ("km total", round(verdicts["length_km"].sum(), 1)),
+        ("km kept", round(kept["length_km"].sum(), 1)),
+        ("dropped: too short/slow ride", int(verdicts["f_too_short"].sum())),
+        ("dropped: implausible speed", int(verdicts["f_speed"].sum())),
+        ("dropped: blocked/stuck distance sensor", int(verdicts["f_stuck"].sum())),
+        ("dropped: no manoeuvre stream (no events measurable)",
+         int(verdicts["f_no_manoeuvre"].sum())),
     ]
-    s = pd.DataFrame(rows, columns=["metric", "value"])
-    s.to_csv(path, index=False)
-    return s
+    for r in RULES:
+        loose, strict = (judged(**{r.kwarg: p}) for p in (r.loose, r.strict))
+        rows += [
+            (f"sensitivity: {r.kwarg} at {r.loose}", int(loose["keep"].sum())),
+            (f"sensitivity: {r.kwarg} at {r.strict}", int(strict["keep"].sum())),
+            (f"borderline: rides {r.kwarg} alone decides",
+             int((loose[r.flag] != strict[r.flag]).sum())),
+        ]
+
+    rows += [("sensitivity: all loose",
+              int(judged(**{r.kwarg: r.loose for r in RULES})["keep"].sum())),
+             ("sensitivity: all strict",
+              int(judged(**{r.kwarg: r.strict for r in RULES})["keep"].sum()))]
+    path.parent.mkdir(parents=True, exist_ok=True)
+    pd.DataFrame(rows, columns=["metric", "value"]).to_csv(path, index=False)
+    print(f"[csv] saved -> {path}")
 
 
-# ---------------------------------------------------------------- plots
-
-def _safe(s):
-    return re.sub(r"[^\w.-]+", "_", str(s))[:60]
+# ========= plotting =========
 
 
-def box_label(t):
-    return f"{t['boxName'].iloc[0]} [{str(t[BOX_ID_COL].iloc[0])[-6:]}]"
-
-
-def _scatter_traj(ax, t, size_scale=1.0):
-    t = t.sort_values("createdAt")
-    ax.plot(t.geometry.x, t.geometry.y, color="0.85", linewidth=0.5, zorder=0)
-    det = t[t["value"] > 0]
-    if det.empty:
-        return None
-    v = det["value"].to_numpy(dtype=float)
-    s = (3 + 50 * np.sqrt(np.clip(v, 0, VALUE_VMAX) / VALUE_VMAX)) * size_scale
-    return ax.scatter(det.geometry.x, det.geometry.y, s=s, c=v, cmap=CMAP,
-                      vmin=VALUE_VMIN, vmax=VALUE_VMAX, alpha=0.7,
-                      edgecolors="none", zorder=1)
-
-
-def plot_box_overview(gdf, path=OVERVIEW_PATH):
-    boxes = sorted(gdf.groupby(BOX_ID_COL, sort=False), key=lambda kv: -len(kv[1]))
-    n, ncols = len(boxes), 6
-    nrows = -(-n // ncols)
-    fig, axes = plt.subplots(nrows, ncols, figsize=(3.2 * ncols, 3.2 * nrows))
-    axes = np.atleast_1d(axes).flatten()
-    sc = None
-
-    for ax, (bid, b) in zip(axes, boxes):
-        v = b["value"].to_numpy(dtype=float)
-        nz_share = (v > 0).mean()
-        for _, t in b.groupby("traj_id", sort=False):
-            _sc = _scatter_traj(ax, t, size_scale=0.5)
-            if _sc is not None:
-                sc = _sc
-        n_ot = int((b["man_p"] >= MAN_P_TAU).sum())
-        ax.set_title(f"{box_label(b)}\n{b['traj_id'].nunique()} rides | {len(b)} seconds\n"
-                     f"{nz_share:.0%} object in range | {n_ot} overtake-seconds", fontsize=8)
-        ax.set_aspect("equal")
-        ax.set_axis_off()
-
-    for ax in axes[n:]:
-        ax.set_visible(False)
-    if sc is not None:
-        fig.colorbar(sc, ax=axes.tolist(), shrink=0.4, location="right",
-                     pad=0.01).set_label("distance reading (cm, capped at scale max)")
-    fig.suptitle("Per-box overview -- one map per box, all its rides\n"
-                 "grey line = GPS path; dots = seconds with an object in sensor range "
-                 "(bigger/brighter = farther); overtake-seconds = classifier confident a car passed",
-                 fontsize=13, y=1.005)
+def _save(fig, path, announce=True):
+    """Write and close a figure; the per-box pages are announced once, in main()."""
     path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(path, dpi=150, bbox_inches="tight")
     plt.close(fig)
-    print(f"[plot] saved -> {path}")
+    if announce:
+        print(f"[fig] saved -> {path}")
 
 
-def plot_one_box(gdf_box, out_dir=PER_BOX_DIR):
-    bid = gdf_box[BOX_ID_COL].iloc[0]
-    name = gdf_box["boxName"].iloc[0]
-    trajs = sorted(gdf_box.groupby("traj_id", sort=False), key=lambda kv: -len(kv[1]))
-    ncols = 4
-    nrows = -(-len(trajs) // ncols)
-    fig, axes = plt.subplots(nrows, ncols, figsize=(3.6 * ncols, 3.6 * nrows))
-    axes = np.atleast_1d(axes).flatten()
-    sc = None
+def _scatter_ride(ax, ride, size_scale=1.0):
+    """A ride's GPS path in grey, with a dot per second the sensor saw something."""
+    ride = ride.sort_values("createdAt")
+    ax.plot(ride.geometry.x, ride.geometry.y, color="lightgrey", linewidth=0.5, zorder=0)
+    det = ride[ride["value"] > 0]
+    v = det["value"].to_numpy(dtype=float)
+    ax.scatter(det.geometry.x, det.geometry.y, c=v, cmap="magma",
+               s=(3 + 50 * np.sqrt(np.clip(v, 0, VALUE_VMAX) / VALUE_VMAX)) * size_scale,
+               vmin=VALUE_VMIN, vmax=VALUE_VMAX, alpha=0.7, edgecolors="none", zorder=1)
 
-    for ax, (tid, t) in zip(axes, trajs):
-        _sc = _scatter_traj(ax, t)
-        if _sc is not None:
-            sc = _sc
-        v = t["value"].to_numpy(dtype=float)
-        ax.set_title(f"ride ..{str(tid)[-4:]} | {len(t)} seconds\n"
-                     f"{(v > 0).mean():.0%} object in range | varies {dist_variation_cm(v):.0f} cm",
+
+def fig_per_box(gdf_box, out_dir=PER_BOX_DIR, ncols=4):
+    """One page per box, one panel per ride, for spotting the stuck-sensor rides."""
+    bid, name = gdf_box[BOX_ID_COL].iloc[0], gdf_box["boxName"].iloc[0]
+    rides = sorted(gdf_box.groupby("traj_id", sort=False), key=lambda kv: -len(kv[1]))
+    nrows = -(-len(rides) // ncols)
+
+    fig, axes = plt.subplots(nrows, ncols, figsize=(3.6 * ncols, 3.6 * nrows), squeeze=False)
+    for ax, (traj_id, ride) in zip(axes.flat, rides):
+        _scatter_ride(ax, ride)
+        v = ride["value"].to_numpy(dtype=float)
+        ax.set_title(f"ride ..{str(traj_id)[-4:]} | {len(ride)} seconds\n"
+                     f"{(v > 0).mean():.0%} object in range | varies {_dist_variation_cm(v):.0f} cm",
                      fontsize=8)
         ax.set_aspect("equal")
         ax.set_axis_off()
-
-    for ax in axes[len(trajs):]:
+    for ax in axes.flat[len(rides):]:
         ax.set_visible(False)
-    if sc is not None:
-        fig.colorbar(sc, ax=axes.tolist(), shrink=0.5, location="right", pad=0.01)
-    fig.suptitle(f"{name}  [{bid}]  --  {len(trajs)} rides, one map each\n"
-                 "grey line = GPS path; dots = seconds with an object in sensor range; "
-                 "'varies X cm' = typical variation of the readings; near 0 = sensor stared "
-                 "at one object (stuck filter)",
+
+    bar = fig.colorbar(plt.cm.ScalarMappable(cmap="magma",
+                                             norm=plt.Normalize(VALUE_VMIN, VALUE_VMAX)),
+                       ax=axes.ravel().tolist(), shrink=0.5, location="right", pad=0.01)
+    bar.set_label("distance reading (cm)", fontsize=11)
+    bar.ax.tick_params(labelsize=11)
+    fig.suptitle(f"{name}  [{bid}] - {len(rides)} rides, one map each",
                  fontsize=12, y=1.005)
-    out_dir.mkdir(parents=True, exist_ok=True)
-    p = out_dir / f"{_safe(name)}__{_safe(bid)}.png"
-    fig.savefig(p, dpi=150, bbox_inches="tight")
-    plt.close(fig)
-    return p
+    stem = "__".join(re.sub(r"[^\w.-]+", "_", str(s))[:60] for s in (name, bid))
+    _save(fig, out_dir / f"{stem}.png", announce=False)
+
+
+def main():
+    pts = add_point_id(segment_trajectories(add_manoeuvre_channel(
+        load_distance_channel(bbox_from_graph()))))
+    print(f"{pts['traj_id'].nunique()} rides from {pts[BOX_ID_COL].nunique()} boxes, "
+          f"{len(pts)} points")
+
+    OUT_DIR.mkdir(parents=True, exist_ok=True)
+    SEG_POINTS_PATH.unlink(missing_ok=True)
+    pts.to_file(SEG_POINTS_PATH, driver="GPKG")
+    print(f"[gpkg] saved -> {SEG_POINTS_PATH}")
+
+    stats = per_ride_stats(pts)
+    verdicts = apply_quality_rules(stats)
+    (verdicts.sort_values(["keep", "n_flags"], ascending=[True, False])   # worst first
+             .to_csv(QUALITY_CSV, index=False))
+    print(f"[csv] saved -> {QUALITY_CSV}")
+    print(f"kept {verdicts['keep'].sum()}/{len(verdicts)} rides "
+          f"({verdicts['keep'].mean():.0%})")
+    rule_sensitivity(stats, verdicts)
+
+    for _, box in pts.groupby(BOX_ID_COL, sort=False):
+        fig_per_box(box)
+    print(f"[fig] saved -> {PER_BOX_DIR}/ ({pts[BOX_ID_COL].nunique()} per-box pages)")
+    print("\nDONE")
 
 
 if __name__ == "__main__":
-    pts = add_point_id(segment_trajectories(add_manoeuvre(
-        load_points(INPUT_CSV, bbox=bbox_from_graph()))))
-    print(f"[diag] {pts['traj_id'].nunique()} trajectories from "
-          f"{pts[BOX_ID_COL].nunique()} boxes, {len(pts)} points")
-
-    OUT_DIR.mkdir(parents=True, exist_ok=True)
-    SEG_POINTS_PATH.unlink(missing_ok=True)  # avoid stale extra layers in the gpkg
-    pts.to_file(SEG_POINTS_PATH, driver="GPKG")
-    print(f"[diag] segmented points -> {SEG_POINTS_PATH}")
-
-    q = build_quality_table(per_trajectory_stats(pts))
-    q.to_csv(QUALITY_CSV, index=False)
-    diagnostic_summary(q)
-    print(f"[diag] kept {q['keep'].sum()}/{len(q)} rides ({q['keep'].mean():.0%}) -> {QUALITY_CSV}")
-    print(f"[diag] summary -> {SUMMARY_CSV}")
-
-    plot_box_overview(pts)
-    for _, b in pts.groupby(BOX_ID_COL, sort=False):
-        plot_one_box(b)
-    print(f"[plot] per-box pages -> {PER_BOX_DIR}/")
+    main()
