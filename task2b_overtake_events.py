@@ -1,280 +1,185 @@
 """Extract overtake events from the rides that passed quality control.
 
-Keeps only approved rides, then collapses each burst of high manoeuvre probability
-(man_p >= MAN_P_TAU, gaps up to MERGE_GAP_S merged) into one event per car pass. Each
-event carries first, last and anchor point ids so task 3 can pin it onto a matched edge.
-The anchor is the highest-probability point, the best guess for when the car was alongside.
+A burst of high manoeuvre probability becomes one event per car pass.
+Each event carries first, last and anchor point ids; the anchor is the highest-probability point.
 
-Writes to output/task2_trajectories/:
-  task2b_trajectory_points.gpkg    points of the kept rides, the input to map-matching
+Writes to output/task2_overtakes/:
   task2b_overtake_events.gpkg      one row per overtake
   task2b_trajectory_summary.csv    one row per ride
-plus two figures to output/figures/.
+  task2b_event_sensitivity.csv     what the event count rests on
+  task2b_overtakes_per_box.png     overtakes against rider hours, one point per box
 """
+
 from pathlib import Path
 
 import geopandas as gpd
-import matplotlib.dates as mdates
-import numpy as np
+import matplotlib.pyplot as plt
 import pandas as pd
-from matplotlib import pyplot as plt
-from shapely.geometry import LineString
 
-from task2a_ride_quality import BOX_ID_COL, MAN_P_TAU, QUALITY_CSV, SEG_POINTS_PATH
+from task2a_ride_quality import QUALITY_CSV, SEG_POINTS_PATH
 
-OUT_DIR = Path("output/task2_trajectories")
-FIG_DIR = Path("output/figures")
-POINTS_PATH = OUT_DIR / "task2b_trajectory_points.gpkg"
+OUT_DIR = Path("output/task2_overtakes")
 EVENTS_PATH = OUT_DIR / "task2b_overtake_events.gpkg"
 SUMMARY_PATH = OUT_DIR / "task2b_trajectory_summary.csv"
-PLOT_PATH = OUT_DIR / "task2b_trajectories.png"
+EVENT_SENSITIVITY_CSV = OUT_DIR / "task2b_event_sensitivity.csv"
 
-CLOSE_PASS_CM = 150                  # ordinal descriptor threshold; NOT meters-true clearance
-MERGE_GAP_S = 5                      # gap below which two bursts are one event
-                                     # (the app max-pools man_p over 2 s, which can split one pass)
-MIN_LENGTH_KM = 0.2
-MAX_LEGEND = 15
+CLOSE_PASS_CM = 150
+MAN_PROB_THRESHOLD = 0.5
+MERGE_GAP_S = 4
 
-INK, MUTED = "black", "dimgrey"
-BLUE, RED = "blue", "red"           # primary / accent
-plt.rcParams.update({"font.size": 11, "text.color": INK, "figure.facecolor": "white", "savefig.facecolor": "white"})
+# probes for sensitivity analysis
+MERGE_GAP_PROBES = [1, 3, 8, 15]
+MAN_PROB_PROBES = [0.2, 0.8]
 
-
-def load_kept_points(points_path=SEG_POINTS_PATH, quality_csv=QUALITY_CSV):
-    """Segmented points of the rides that passed diagnostics."""
-    pts = gpd.read_file(points_path)
-    pts["createdAt"] = pd.to_datetime(pts["createdAt"], utc=True)
-    q = pd.read_csv(quality_csv)
-    good = set(q.loc[q["keep"], "traj_id"])
-    kept = pts[pts["traj_id"].isin(good)].reset_index(drop=True)
-    print(f"[load] {kept['traj_id'].nunique()}/{pts['traj_id'].nunique()} rides kept "
-          f"({len(kept)} points) from {points_path.name}")
-    return kept
+EVENT_COLS = ["event_uid", "traj_id", "event_id", "boxId", "start", "end",
+              "duration_s", "n_seconds", "max_man_p", "min_clearance_cm",
+              "mean_clearance_cm", "is_close", "first_point_id", "last_point_id",
+              "anchor_point_id", "geometry"]
 
 
-def extract_overtake_events(gdf, man_p_tau=MAN_P_TAU, merge_gap_s=MERGE_GAP_S):
-    """Collapse high-manoeuvre-probability bursts into one row per overtake event."""
-    g = gdf[gdf["man_p"] >= man_p_tau].copy()
-    g = g.sort_values(["traj_id", "createdAt"])
-    cols = ["event_uid", "traj_id", "event_id", "boxId", "start", "end",
-            "duration_s", "n_samples", "max_man_p", "min_clearance_cm",
-            "mean_clearance_cm", "is_close", "first_point_id", "last_point_id",
-            "closest_point_id", "geometry"]
-    if g.empty:
-        return gpd.GeoDataFrame(columns=cols, geometry="geometry", crs=gdf.crs)
+def load_kept_rides(points_path=SEG_POINTS_PATH, quality_csv=QUALITY_CSV):
+    """Load the rides task 2a passed."""
+    quality = pd.read_csv(quality_csv, parse_dates=["start", "end"])
+    rides = quality[quality["keep"]].set_index("traj_id")
+    points = gpd.read_file(points_path)
+    points["createdAt"] = pd.to_datetime(points["createdAt"], utc=True)
+    points = points[points["keep"]].reset_index(drop=True)
+    print(f"[load] {len(rides)}/{len(quality)} rides kept ({len(points)} points) "
+          f"from {points_path.name}")
+    return points, rides
 
-    dt = g.groupby("traj_id")["createdAt"].diff().dt.total_seconds()
-    new_event = dt.isna() | (dt > merge_gap_s)
-    g["event_id"] = new_event.groupby(g["traj_id"]).cumsum()
 
-    def one_event(e):
-        e = e.sort_values("createdAt")
-        anchor = e.loc[e["man_p"].idxmax()]
-        nz = e.loc[e["value"] > 0, "value"]
-        min_d = nz.min() if len(nz) else np.nan
+def extract_overtake_events(points, man_p_tau=MAN_PROB_THRESHOLD, merge_gap_s=MERGE_GAP_S):
+    """Collapse each burst of high manoeuvre probability into one row per overtake."""
+    gated = points[points["man_p"] >= man_p_tau].sort_values(["traj_id", "createdAt"])
+    if gated.empty:
+        return gpd.GeoDataFrame(columns=EVENT_COLS, geometry="geometry", crs=points.crs)
+
+    gap_s = gated.groupby("traj_id")["createdAt"].diff().dt.total_seconds()
+    gated["event_id"] = (gap_s.isna() | (gap_s > merge_gap_s)).groupby(gated["traj_id"]).cumsum()
+
+    def one_event(burst):
+        anchor = burst.loc[burst["man_p"].idxmax()]
+        clearances = burst.loc[burst["value"] > 0, "value"]
+        closest = clearances.min()  # NaN when nothing was ever in range
+        start, end = burst["createdAt"].min(), burst["createdAt"].max()
         return pd.Series({
-            "boxId": e["boxId"].iloc[0],
-            "start": e["createdAt"].min(),
-            "end": e["createdAt"].max(),
-            "duration_s": (e["createdAt"].max() - e["createdAt"].min()).total_seconds(),
-            "n_samples": len(e),
-            "max_man_p": e["man_p"].max(),
-            "min_clearance_cm": min_d,
-            "mean_clearance_cm": nz.mean() if len(nz) else np.nan,
-            "is_close": bool(min_d < CLOSE_PASS_CM) if pd.notna(min_d) else False,
-            "first_point_id": e["point_id"].iloc[0],
-            "last_point_id": e["point_id"].iloc[-1],
-            "closest_point_id": anchor["point_id"],
+            "boxId": burst["boxId"].iloc[0],
+            "start": start,
+            "end": end,
+            "duration_s": (end - start).total_seconds(),
+            "n_seconds": len(burst),
+            "max_man_p": burst["man_p"].max(),
+            "min_clearance_cm": closest,
+            "mean_clearance_cm": clearances.mean(),
+            "is_close": bool(closest < CLOSE_PASS_CM),
+            "first_point_id": burst["point_id"].iloc[0],
+            "last_point_id": burst["point_id"].iloc[-1],
+            "anchor_point_id": anchor["point_id"],
             "geometry": anchor.geometry,
         })
 
-    events = (g.groupby(["traj_id", "event_id"], group_keys=True)
+    events = (gated.groupby(["traj_id", "event_id"], group_keys=True)
               .apply(one_event, include_groups=False).reset_index())
     events["event_uid"] = events["traj_id"] + "_ev" + events["event_id"].astype(str)
-    return gpd.GeoDataFrame(events[cols], geometry="geometry", crs=gdf.crs)
+    return gpd.GeoDataFrame(events[EVENT_COLS], geometry="geometry", crs=points.crs)
 
 
-def summarise(gdf, events, min_length_km=MIN_LENGTH_KM):
-    def length_km(t):
-        pts = t.sort_values("createdAt").geometry.values
-        return LineString(pts).length / 1000 if len(pts) >= 2 else 0.0
-
-    grp = gdf.groupby("traj_id")
-    summary = pd.DataFrame({
-        "boxId": grp["boxId"].first(),
-        "boxName": grp["boxName"].first(),
-        "start": grp["createdAt"].min(),
-        "end": grp["createdAt"].max(),
-        "n_points": grp.size(),
-        "length_km": grp.apply(length_km),
-    })
-    summary["duration_min"] = (summary["end"] - summary["start"]).dt.total_seconds() / 60
-    summary["mean_speed_kmh"] = (
-        summary["length_km"] / (summary["duration_min"] / 60).replace(0, np.nan)
-    )
-
+def summarise(rides, events):
+    """Each kept ride as task 2a measured it, plus the overtake rates and descriptives found on it."""
+    summary = rides.copy()
     if len(events):
-        eg = events.groupby("traj_id")
-        ev_stats = pd.DataFrame({
-            "n_overtakes": eg.size(),
-            "n_close_passes": eg["is_close"].sum(),
-            "min_overtake_cm": eg["min_clearance_cm"].min(),
-            "mean_overtake_cm": eg["min_clearance_cm"].mean(),
-            "mean_event_duration_s": eg["duration_s"].mean(),
-        })
-        summary = summary.join(ev_stats)
-    for c in ["n_overtakes", "n_close_passes"]:
+        by_event = events.groupby("traj_id")
+        summary = summary.join(pd.DataFrame({
+            "n_overtakes": by_event.size(),
+            "n_close_passes": by_event["is_close"].sum(),
+            "min_overtake_cm": by_event["min_clearance_cm"].min(),
+            "mean_overtake_cm": by_event["min_clearance_cm"].mean(),
+            "mean_event_duration_s": by_event["duration_s"].mean(),
+        }))
+    for c in ("n_overtakes", "n_close_passes"):
         summary[c] = summary.get(c, pd.Series(0, index=summary.index)).fillna(0).astype(int)
 
-    usable = summary["length_km"].where(summary["length_km"] >= min_length_km)
-    summary["overtake_rate_per_km"] = summary["n_overtakes"] / usable
-    return summary.sort_values("overtake_rate_per_km", ascending=False)
+    hours = summary["duration_min"] / 60          # task 2a already dropped the stubs
+    summary["overtake_rate_per_km"] = summary["n_overtakes"] / summary["length_km"]
+    summary["overtake_rate_per_h"] = summary["n_overtakes"] / hours.where(hours > 0)
+    return summary.sort_values("overtake_rate_per_h", ascending=False)
 
 
-def _save(fig, name):
-    FIG_DIR.mkdir(parents=True, exist_ok=True)
-    p = FIG_DIR / name
-    fig.savefig(p, dpi=150, bbox_inches="tight")
-    plt.close(fig)
-    print(f"[fig] saved -> {p}")
+def event_sensitivity(points, path=EVENT_SENSITIVITY_CSV):
+    """How many overtakes the two event-defining constants are worth."""
+    def n_events(**thresholds):
+        return len(extract_overtake_events(points, **thresholds))
+
+    rows = [("gated seconds", int((points["man_p"] >= MAN_PROB_THRESHOLD).sum())),
+            (f"events at merge gap {MERGE_GAP_S} s, gate {MAN_PROB_THRESHOLD}", n_events())]
+    rows += [(f"events at merge gap {gap} s", n_events(merge_gap_s=gap))
+             for gap in MERGE_GAP_PROBES]
+    rows += [(f"events at gate {tau}", n_events(man_p_tau=tau))
+             for tau in MAN_PROB_PROBES]
+    pd.DataFrame(rows, columns=["metric", "value"]).to_csv(path, index=False)
+    print(f"[csv] saved -> {path}")
 
 
-def fig_box_activity(summary):
-    """One row per box: a faint lifespan bar (first→last ride) with a tick per ride.
-    Sorted by first activity, so boxes appearing over time form a staircase."""
-    s = summary.copy()
-    s["start_num"] = mdates.date2num(s["start"])
-    first = s.groupby("boxName")["start_num"].min()
-    last = s.groupby("boxName")["start_num"].max()
-    order = first.sort_values(ascending=False).index
-    ypos = {name: i for i, name in enumerate(order)}
-
-    fig, ax = plt.subplots(figsize=(11, 9))
-    ax.set_facecolor("white")
-    for name in order:
-        y = ypos[name]
-        ax.plot([first[name], last[name]], [y, y], color="0.86", lw=3,
-                solid_capstyle="round", zorder=1)
-    ax.scatter(s["start_num"], [ypos[n] for n in s["boxName"]],
-               s=12, color=BLUE, alpha=0.8, marker="|", linewidths=1.1, zorder=2)
-
-    ax.set_yticks(range(len(order)))
-    ax.set_yticklabels([n[:22] for n in order], fontsize=7)
-    ax.set_ylim(-1, len(order))
-    ax.set_xlim(s["start_num"].min() - 15, s["start_num"].max() + 15)
-    ax.xaxis.set_major_locator(mdates.MonthLocator(interval=3))
-    ax.xaxis.set_major_formatter(mdates.DateFormatter("%b %Y"))
-    ax.xaxis.set_minor_locator(mdates.MonthLocator(interval=1))
-    ax.tick_params(axis="x", which="minor", length=0)
-    ax.tick_params(axis="x", which="major", labelsize=10, colors=MUTED)
-    for side in ("top", "right", "left"):
-        ax.spines[side].set_visible(False)
-    ax.spines["bottom"].set_color(MUTED)
-    ax.tick_params(axis="y", length=0)
-    ax.set_title(f"When each senseBox was active  ({s['boxName'].nunique()} boxes, "
-                 f"{len(s)} rides)\nCollection is episodic — most boxes ride briefly, "
-                 "a few carry the dataset",
-                 loc="left", fontsize=14, pad=12)
-    _save(fig, "task2b_box_activity.png")
+# ========= plotting =========
 
 
-def fig_overtake_extraction(pts, traj_id="67226da749d0900007ca343c_40",
-                            win_start_s=60, win_end_s=210):
-    """One ride's classifier confidence over time; gated bursts become events —
-    the picture of what extract_overtake_events() does."""
-    t = pts[pts["traj_id"] == traj_id].sort_values("createdAt").copy()
-    if t.empty:
-        print(f"[fig] skipped task2b_overtake_extraction: traj_id {traj_id} not in the kept rides")
-        return
-    t0 = t["createdAt"].min()
-    t["s"] = (t["createdAt"] - t0).dt.total_seconds()
-    w = t[(t["s"] >= win_start_s) & (t["s"] <= win_end_s)]
-
-    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(11, 5.2), sharex=True,
-                                   gridspec_kw={"height_ratios": [2, 1], "hspace": 0.12})
-    # shade gated bursts (man_p >= tau), merged if <= MERGE_GAP_S apart
-    gated = w[w["man_p"] >= MAN_P_TAU]
-    if len(gated):
-        brk = gated["s"].diff().gt(MERGE_GAP_S).cumsum()
-        for _, g in gated.groupby(brk):
-            for ax in (ax1, ax2):
-                ax.axvspan(g["s"].min() - 0.5, g["s"].max() + 0.5,
-                           color=RED, alpha=0.13, zorder=0)
-
-    ax1.plot(w["s"], w["man_p"], color=BLUE, lw=1.6)
-    ax1.axhline(MAN_P_TAU, color=MUTED, ls="--", lw=1)
-    ax1.text(w["s"].min(), MAN_P_TAU + 0.03, f"gate  τ = {MAN_P_TAU}",
-             color=MUTED, fontsize=10)
-    ax1.set_ylabel("classifier\nconfidence")
-    ax1.set_ylim(-0.03, 1.03)
-
-    ax2.plot(w["s"], w["value"].where(w["value"] > 0), color="0.55", lw=1.2)
-    ax2.set_ylabel("distance\n(cm)")
-    ax2.set_xlabel("seconds into ride")
-
-    n_ev = 0 if not len(gated) else (gated["s"].diff().gt(MERGE_GAP_S).sum() + 1)
-    for ax in (ax1, ax2):
-        for side in ("top", "right"):
-            ax.spines[side].set_visible(False)
-        ax.tick_params(length=0)
-    ax1.set_title("From sensor stream to overtake events\n"
-                  f"red bands = seconds the classifier flags a passing car → "
-                  f"{int(n_ev)} events in this 2.5-min window",
-                  loc="left", fontsize=14, pad=10)
-    _save(fig, "task2b_overtake_extraction.png")
-
-
-def plot_trajectories(gdf, color_by=BOX_ID_COL, path=PLOT_PATH, max_legend=MAX_LEGEND):
-    records = []
-    for traj_id, t in gdf.groupby("traj_id"):
-        t = t.sort_values("createdAt")
-        if len(t) >= 2:
-            records.append({"traj_id": traj_id, color_by: t[color_by].iloc[0],
-                            "geometry": LineString(t.geometry.values)})
-    lines = gpd.GeoDataFrame(records, geometry="geometry", crs=gdf.crs)
-
-    cats = lines[color_by].value_counts().index
-    cmap = plt.get_cmap("tab20" if len(cats) > 10 else "tab10")
-
-    fig, ax = plt.subplots(figsize=(12, 12))
-    for i, cat in enumerate(cats):
-        sub = lines[lines[color_by] == cat]
-        label = f"{str(cat)[:12]} ({len(sub)})" if i < max_legend else None
-        sub.plot(ax=ax, color=cmap(i % cmap.N), linewidth=0.7, alpha=0.7,
-                 label=label, zorder=1)
-    ax.set_aspect("equal")
-    ax.set_axis_off()
-    ax.set_title(f"senseBox trajectory coverage by {color_by}")
-    extra = len(cats) - min(len(cats), max_legend)
-    ax.legend(loc="center left", bbox_to_anchor=(1.0, 0.5), fontsize=7,
-              title=color_by + (f"  (+{extra} more)" if extra > 0 else ""), frameon=False)
+def _save(fig, path):
+    path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(path, dpi=150, bbox_inches="tight")
     plt.close(fig)
-    print(f"[plot] saved -> {path}")
+    print(f"[fig] saved -> {path}")
+
+
+def fig_overtakes_per_box(summary):
+    """Overtakes against rider-hours, one point per box.
+    Spread around the dashed pooled rate is the between-rider variation."""
+    hours = summary["duration_min"] / 60
+    per_box = (summary.assign(hours=hours)
+               .groupby("boxId").agg(hours=("hours", "sum"),
+                                     overtakes=("n_overtakes", "sum")))
+    pooled = summary["n_overtakes"].sum() / hours.sum()
+    span = [0, per_box["hours"].max()]
+
+    fig, ax = plt.subplots(figsize=(6.5, 5))
+    ax.plot(span, [pooled * x for x in span], color="dimgrey", ls="--", lw=1.2, zorder=1)
+    ax.scatter(per_box["hours"], per_box["overtakes"], s=24, color="crimson",
+               alpha=0.6, edgecolors="none", zorder=2)
+    ax.annotate(f"pooled rate {pooled:.1f}/h", xy=(span[1], pooled * span[1]),
+                xytext=(-8, 10), textcoords="offset points", ha="right",
+                color="dimgrey", fontsize=10)
+    ax.set_xlabel("rider hours", fontsize=11)
+    ax.set_ylabel("overtakes recorded", fontsize=11)
+    for side in ("top", "right"):
+        ax.spines[side].set_visible(False)
+    ax.set_title(f"Overtakes against exposure ({len(per_box)} boxes)",
+                 loc="left", fontsize=11)
+    _save(fig, OUT_DIR / "task2b_overtakes_per_box.png")
 
 
 def main():
-    pts = load_kept_points()
-    events = extract_overtake_events(pts)
-    summ = summarise(pts, events)
-    print(f"[events] {len(events)} overtake events "
-          f"({int(events['is_close'].sum())} with proximity < {CLOSE_PASS_CM} cm) "
-          f"over {summ['length_km'].sum():.0f} km "
-          f"-> {len(events) / summ['length_km'].sum():.2f} events/km")
+    points, rides = load_kept_rides()
+    events = extract_overtake_events(points)
+    summary = summarise(rides, events)
+    km = summary["length_km"].sum()
+    print(f"{len(events)} overtake events "
+          f"({int(events['is_close'].sum())} closer than {CLOSE_PASS_CM} cm) "
+          f"over {km:.0f} km -> {len(events) / km:.2f} events/km")
 
     OUT_DIR.mkdir(parents=True, exist_ok=True)
-    for p in (POINTS_PATH, EVENTS_PATH):
-        p.unlink(missing_ok=True)   # a leftover file would keep stale layers alongside the new one
-    pts.to_file(POINTS_PATH, driver="GPKG")
+    EVENTS_PATH.unlink(missing_ok=True)
     events.to_file(EVENTS_PATH, driver="GPKG")
-    summ.to_csv(SUMMARY_PATH)
-    print(f"saved: {POINTS_PATH.name}, {EVENTS_PATH.name}, {SUMMARY_PATH.name}")
-    try:                                        # plots must never block the data outputs
-        plot_trajectories(pts)
-        fig_box_activity(summ)
-        fig_overtake_extraction(pts)
-    except Exception as e:
-        print(f"[plot] FAILED ({e}) -> data outputs are saved, only the figures are missing")
+    print(f"[gpkg] saved -> {EVENTS_PATH}")
+
+    summary.to_csv(SUMMARY_PATH)
+    print(f"[csv] saved -> {SUMMARY_PATH}")
+
+    event_sensitivity(points)
+
+    fig_overtakes_per_box(summary)
+    print(f"[fig] saved -> {OUT_DIR / 'task2b_overtakes_per_box.png'}")
+
+    print("\nDONE")
 
 
 if __name__ == "__main__":
