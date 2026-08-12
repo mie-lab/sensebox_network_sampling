@@ -177,8 +177,6 @@ def main():
     event_sensitivity(points)
 
     fig_overtakes_per_box(summary)
-    print(f"[fig] saved -> {OUT_DIR / 'task2b_overtakes_per_box.png'}")
-
     print("\nDONE")
 
 
