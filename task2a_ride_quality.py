@@ -7,6 +7,7 @@ Writes to output/task2_diagnostics/:
   task2a_segmented_points.gpkg     every point with its ride id, read by task 2b
   task2a_trajectory_quality.csv    one row per ride: stats, flags, keep verdict
   task2a_diagnostics_summary.csv   headline numbers and threshold sensitivity
+  task2a_trajectories.png          the kept rides, coloured by box
   task2a_per_box/                  one page per box, one panel per ride
 """
 
@@ -30,6 +31,7 @@ OUT_DIR = Path("output/task2_diagnostics")
 SEG_POINTS_PATH = OUT_DIR / "task2a_segmented_points.gpkg"
 QUALITY_CSV = OUT_DIR / "task2a_trajectory_quality.csv"
 SUMMARY_CSV = OUT_DIR / "task2a_diagnostics_summary.csv"
+TRAJECTORIES_FIG = OUT_DIR / "task2a_trajectories.png"
 PER_BOX_DIR = OUT_DIR / "task2a_per_box"
 
 CRS_WGS84 = "EPSG:4326"
@@ -63,6 +65,7 @@ RULES = [
 ]
 
 VALUE_VMIN, VALUE_VMAX = 0, 250
+MAX_LEGEND = 15
 
 
 # ========= load sensor data =========
@@ -255,6 +258,31 @@ def _scatter_ride(ax, ride, size_scale=1.0):
                vmin=VALUE_VMIN, vmax=VALUE_VMAX, alpha=0.7, edgecolors="none", zorder=1)
 
 
+def fig_trajectories(gdf, color_by=BOX_ID_COL, max_legend=MAX_LEGEND):
+    """Every kept ride as a line, coloured by box, to show where the data comes from."""
+    lines = gpd.GeoDataFrame(
+        [{color_by: ride[color_by].iloc[0],
+          "geometry": LineString(ride.sort_values("createdAt").geometry.values)}
+         for _, ride in gdf.groupby("traj_id") if len(ride) >= 2],
+        geometry="geometry", crs=gdf.crs)
+
+    cats = lines[color_by].value_counts().index
+    cmap = plt.get_cmap("tab20" if len(cats) > 10 else "tab10")
+
+    fig, ax = plt.subplots(figsize=(12, 12))
+    for i, cat in enumerate(cats):
+        subset = lines[lines[color_by] == cat]
+        subset.plot(ax=ax, color=cmap(i % cmap.N), linewidth=0.7, alpha=0.7, zorder=1,
+                    label=f"{str(cat)[:12]} ({len(subset)})" if i < max_legend else None)
+    ax.set_aspect("equal")
+    ax.set_axis_off()
+    ax.set_title(f"senseBox trajectory coverage by {color_by}", fontsize=11)
+    extra = len(cats) - min(len(cats), max_legend)
+    ax.legend(loc="center left", bbox_to_anchor=(1.0, 0.5), fontsize=7, frameon=False,
+              title=color_by + (f"  (+{extra} more)" if extra > 0 else ""))
+    _save(fig, OUT_DIR / "task2a_trajectories.png")
+
+
 def fig_per_box(gdf_box, out_dir=PER_BOX_DIR, ncols=4):
     """One page per box, one panel per ride, for spotting the stuck-sensor rides."""
     bid, name = gdf_box[BOX_ID_COL].iloc[0], gdf_box["boxName"].iloc[0]
@@ -304,6 +332,7 @@ def main():
           f"({verdicts['keep'].mean():.0%})")
     rule_sensitivity(stats, verdicts)
 
+    fig_trajectories(pts[pts["traj_id"].isin(verdicts.loc[verdicts["keep"], "traj_id"])])
     for _, box in pts.groupby(BOX_ID_COL, sort=False):
         fig_per_box(box)
     print(f"[fig] saved -> {PER_BOX_DIR}/ ({pts[BOX_ID_COL].nunique()} per-box pages)")
