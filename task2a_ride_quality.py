@@ -341,7 +341,7 @@ def fig_per_box(gdf_box, out_dir=PER_BOX_DIR, ncols=4):
     bar.set_label("distance reading (cm)", fontsize=11)
     bar.ax.tick_params(labelsize=11)
     fig.suptitle(f"{name}  [{bid}] - {len(rides)} rides, one map each",
-                 fontsize=12, y=1.005)
+                 fontsize=11, y=1.005)
     stem = "__".join(re.sub(r"[^\w.-]+", "_", str(s))[:60] for s in (name, bid))
     _save(fig, out_dir / f"{stem}.png", announce=False)
 
