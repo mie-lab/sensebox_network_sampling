@@ -161,6 +161,7 @@ def per_ride_stats(gdf):
             "n_nonzero": int(in_range.sum()),
             "in_range_share": float(in_range.mean()),
             "dist_variation_cm": _dist_variation_cm(v),
+            "cadence_s": ride["createdAt"].diff().dt.total_seconds().median(),
             "man_missing_share": ride["man_p"].isna().mean(),
             "length_km": length_km,
             "mean_speed_kmh": length_km / (span_s / 3600) if span_s > 0 else np.nan,
@@ -366,6 +367,11 @@ def main():
     print(f"[csv] saved -> {QUALITY_CSV}")
     print(f"kept {verdicts['keep'].sum()}/{len(verdicts)} rides "
           f"({verdicts['keep'].mean():.0%})")
+
+    # cadence is measured per ride because 11 boxes do not hold one rate across theirs
+    per_box = verdicts[verdicts["keep"]].groupby("boxId")["cadence_s"].mean().round()
+    print("logging cadence: " + ", ".join(
+        f"{n} boxes at {s:.0f} s" for s, n in per_box.value_counts().sort_index().items()))
     rule_sensitivity(stats, verdicts)
 
     fig_trajectories(pts[pts["keep"]])
