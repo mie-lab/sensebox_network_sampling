@@ -18,7 +18,7 @@ import pandas as pd
 DOWNLOAD_START = datetime(2024, 8, 1, tzinfo=timezone.utc)
 DOWNLOAD_END = datetime(2026, 8, 1, tzinfo=timezone.utc)
 
-BBOX = "7.45,51.82,7.80,52.08"                              # Muenster + some margin
+BBOX = "7.45,51.82,7.80,52.08"  # Muenster + some margin
 PHENOMENA = ["Overtaking Distance", "Overtaking Manoeuvre"]
 COLUMNS = "lat,lon,boxName,boxId,unit,value,createdAt"
 # ================================
@@ -46,6 +46,9 @@ def _fetch_month(phenomenon, month_start, month_end):
                 df = pd.read_csv(r)
             print(f"  {month}  {len(df):>7} rows")
             return df
+        except pd.errors.EmptyDataError:
+            print(f"  {month}        0 rows")
+            return pd.DataFrame()
         except Exception as e:
             print(f"  {month}  attempt {attempt}/{MAX_ATTEMPTS} failed: {e}")
             time.sleep(15 * attempt)
