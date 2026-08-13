@@ -37,8 +37,6 @@ task5a_diagnostics.py
 task5b_risk_gamma.py       
 task5c_risk_gp.py           
 
-cache/                              osmnx's raw Overpass responses
-
 input/
   muenster_overtaking_*.csv         openSenseMap channels
   muenster_bike.graphml             OSM network
@@ -54,7 +52,6 @@ output/
   task4_oracle/             the per-edge tables the models read, and the descriptives
   task5_diagnostics/        model-choice evidence
   task5_risk/               fitted risk estimates and CV scores
-  figures/                  shared folder, pre-cleanup; only task 5b and 5c still write here
 
 environment.yml             conda environment
 ```
