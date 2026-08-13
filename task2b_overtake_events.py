@@ -147,7 +147,7 @@ def fig_overtakes_per_box(summary):
                alpha=0.6, edgecolors="none", zorder=2)
     ax.annotate(f"pooled rate {pooled:.1f}/h", xy=(span[1], pooled * span[1]),
                 xytext=(-8, 10), textcoords="offset points", ha="right",
-                color="dimgrey", fontsize=10)
+                color="dimgrey", fontsize=11)
     ax.set_xlabel("rider hours", fontsize=11)
     ax.set_ylabel("overtakes recorded", fontsize=11)
     for side in ("top", "right"):
