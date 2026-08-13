@@ -49,6 +49,7 @@ OVERTAKE_COVERAGE_FIG = OUT_DIR / "task4_overtake_coverage.png"
 RATE_PREDICTORS_FIG = OUT_DIR / "task4_rate_predictors.png"
 
 GAP_CAP_S = 15
+MIN_EVENTS = 20   # a regime thinner than this cannot support a rate of its own
 MOTOR = {"primary", "primary_link", "secondary", "secondary_link", "tertiary",
          "tertiary_link", "trunk", "trunk_link", "unclassified", "residential",
          "living_street"}
@@ -78,24 +79,40 @@ def load_covariates(path=COVARIATES_CSV):
 
 
 def one_street_per_pair(cov):
-    """One row per undirected pair. 31 pairs carry two ways the match cannot separate; n_ways flags them."""
-    ranked = cov.sort_values("length_m", ascending=False)
+    """One row per undirected pair. 31 pairs carry two ways the match cannot separate;
+    n_ways flags them. The shortest wins, as it does in task1's collapse. The traversal
+    count cannot break the tie, since leuven keys on the node pair and both ways carry the
+    same count, but the matched points can: assigning each to the nearer geometry puts the
+    riding on the shorter way in all 10 ridden pairs whose ways disagree on edge_class, at
+    71% to 100% of points. Checked once rather than run every time, since the whole question
+    is worth 3 events."""
+    ranked = cov.sort_values("length_m")
     streets = ranked.drop_duplicates(subset=["u_lo", "v_hi"]).copy()
     n_ways = (cov.assign(_len=cov["length_m"].round(3))
               .groupby(["u_lo", "v_hi"])["_len"].nunique())
     streets["n_ways"] = streets.set_index(["u_lo", "v_hi"]).index.map(n_ways)
-    return streets
+    return streets.reset_index(drop=True)
 
 
 def build_inventory(cov, streets):
-    """Every directed edge in the network, carrying its street's covariates."""
+    """Every directed edge in the network, carrying its street's covariates.
+    Betweenness is the exception: it is measured per directed edge, so each direction keeps
+    its own instead of inheriting whichever one survived the street collapse. A direction
+    OSM never digitised has none of its own and borrows the other's.
+    """
     digitised = set(zip(cov["u"], cov["v"]))
-    streets = streets.drop(columns=["u", "v"])
+    streets = streets.drop(columns=["u", "v", "betweenness"])
     fwd = streets.assign(u=streets["u_lo"], v=streets["v_hi"])
     rev = streets.assign(u=streets["v_hi"], v=streets["u_lo"])
     inv = pd.concat([fwd, rev], ignore_index=True)
     inv["is_digitised_dir"] = pd.MultiIndex.from_arrays([inv["u"], inv["v"]]).isin(digitised)
-    return inv
+
+    bet = cov[["u", "v", "betweenness"]]
+    inv = inv.merge(bet, on=["u", "v"], how="left")
+    inv = inv.merge(bet.rename(columns={"u": "v", "v": "u", "betweenness": "bet_rev"}),
+                    on=["u", "v"], how="left")
+    inv["betweenness"] = inv["betweenness"].fillna(inv["bet_rev"])
+    return inv.drop(columns="bet_rev")
 
 
 def build_traversals(streets, points_path=MATCHED_POINTS_PATH):
@@ -199,8 +216,7 @@ def build_oracle(inventory, traversals, events):
     o["rate_per_rider_h"] = _rate(o["n_events"], o["rider_h"])
 
     drop = ["rider_s", "is_sidepath", "is_cycling_street", "has_track_tag",
-            "has_lane_tag", "n_accidents", "n_acc_severe", "n_accidents_recent",
-            "n_acc_bike_recent", "aadt_hgv"]
+            "has_lane_tag", "n_acc_bike_recent", "aadt_hgv"]
     o = o.drop(columns=[c for c in drop if c in o.columns])
 
     front = ["u", "v", "u_lo", "v_hi", "edge_class", "is_observed",
@@ -223,7 +239,7 @@ def _write(df, path):
     print(f"[csv] saved -> {path}")
 
 
-def _poisson_ci(n, e):
+def poisson_ci(n, e):
     """95% interval on a rate n/e from the Poisson count n."""
     if e <= 0:
         return np.nan, np.nan, np.nan
@@ -274,7 +290,7 @@ def rate_by_group(oracle, trav, ev):
         n, hours = float(n), float(hours)
         if n < 5 or hours <= 0:  # too thin to say anything
             return
-        rate, lo, hi = _poisson_ci(n, hours)
+        rate, lo, hi = poisson_ci(n, hours)
         rows.append(dict(group=group, label=str(label), events=int(n),
                          rider_h=round(hours, 2), rate=round(rate, 3),
                          x_average=round(rate / overall, 2),
@@ -291,7 +307,7 @@ def rate_by_group(oracle, trav, ev):
 
     regimes = (obs.groupby("edge_class").agg(e=("n_events", "sum"), k=("rider_h", "sum"))
                .sort_values("e", ascending=False))
-    for label, r in regimes[regimes["e"] >= 20].iterrows():
+    for label, r in regimes[regimes["e"] >= MIN_EVENTS].iterrows():
         add("riding regime", label.replace("_", " "), r["e"], r["k"])
 
     edge_bins("bicycle accidents", "n_acc_bike", [-1, 0, 1, 3, 1000],
@@ -354,7 +370,7 @@ def intersection_robustness(oracle, ev, buffer_m=15, buffers=(5, 10, 15, 20, 25,
                           "n_all": ev.groupby("edge_class").size(),
                           "n_mid": ev[dist > buffer].groupby("edge_class").size()})
         t = t.dropna(subset=["hr"]).fillna({"n_all": 0, "n_mid": 0})
-        t = t[t["n_all"] >= 20].copy()
+        t = t[t["n_all"] >= MIN_EVENTS].copy()
         t["share_near"] = 1 - t["n_mid"] / t["n_all"]
         for col, n in (("rel_all", "n_all"), ("rel_mid", "n_mid")):
             t[col] = (t[n] / t["hr"]) / (t[n].sum() / t["hr"].sum())
@@ -384,14 +400,14 @@ def intersection_robustness(oracle, ev, buffer_m=15, buffers=(5, 10, 15, 20, 25,
     return pd.DataFrame(sweep)
 
 
+# ======== plotting ==========
+
+
 def _save(fig, path):
     path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(path, dpi=150, bbox_inches="tight")
     plt.close(fig)
     print(f"[fig] saved -> {path}")
-
-
-# ======== plotting ==========
 
 
 def _despine(ax, sides=("top", "right")):
@@ -535,7 +551,7 @@ def fig_coverage_by_regime(cov):
                                    gridspec_kw={"wspace": 0.06})
     axL.barh(y, g["cov"] * 100, color=cols, height=0.72, zorder=2)
     _bar_labels(axL, g["cov"] * 100, lambda v: f"{v / 100:.0%}", 1.5)
-    axL.set_xlim(0, 92)
+    axL.set_xlim(0, max(g["cov"]) * 118)   # room for the label past a 100% bar
     axL.invert_xaxis()
     axL.set_title("BREADTH: edges ever recorded",
                   loc="right", fontsize=11, color="dimgrey", pad=8)
@@ -597,10 +613,10 @@ def fig_revisit_by_regime(cov):
     _save(fig, REVISIT_FIG)
 
 
-def fig_overtake_coverage(oracle, counts, path=OVERTAKE_COVERAGE_FIG):
+def fig_overtake_coverage(counts, path=OVERTAKE_COVERAGE_FIG):
     """The same counts as bars. Log scale, because the zero bar dwarfs the rest."""
-    n = oracle.loc[oracle["is_observed"], "n_events"].to_numpy()
     hist = counts["edges"].to_numpy()
+    zero_share = hist[0] / hist.sum()
 
     fig, ax = plt.subplots(figsize=(7.2, 4))
     ax.bar(range(len(hist)), hist, color=["dimgrey"] + ["crimson"] * (len(hist) - 1),
@@ -614,7 +630,7 @@ def fig_overtake_coverage(oracle, counts, path=OVERTAKE_COVERAGE_FIG):
     ax.set_xticklabels(counts["overtakes"])
     ax.set_xlabel("overtakes recorded on the edge")
     ax.set_ylabel("directed edges  (log scale)")
-    ax.set_title(f"{(n == 0).mean():.0%} of ridden edges saw no overtake",
+    ax.set_title(f"{zero_share:.0%} of ridden edges saw no overtake",
                  fontsize=11, loc="left")
     _despine(ax)
     _save(fig, path)
@@ -664,9 +680,10 @@ def fig_rate_predictors(support, path=RATE_PREDICTORS_FIG):
     ax.tick_params(length=0)
     ax.set_xlabel("overtake rate per rider-hour / network average   (n) = overtakes",
                   fontsize=11)
-    regime = support[support["group"] == "riding regime"]["x_average"]
-    ax.set_title(f"Only street type separates the rate, spanning "
-                 f"{regime.max() / regime.min():.0f}x", loc="left", fontsize=11, pad=10)
+    # not "only street type": accidents and betweenness separate too, just far less
+    spans = support.groupby("group")["x_average"].agg(lambda s: s.max() / s.min())
+    ax.set_title(f"Street type spreads the rate {spans['riding regime']:.0f}x, "
+                 f"wider than any other predictor", loc="left", fontsize=11, pad=10)
     _save(fig, path)
 
 
@@ -696,7 +713,7 @@ def main():
     intersection_robustness(oracle, ev)
 
     fig_coverage_map(ev)
-    fig_overtake_coverage(oracle, counts)
+    fig_overtake_coverage(counts)
     fig_coverage_saturation(trav)
     fig_coverage_concentration(cov_tbl)
     fig_coverage_by_regime(cov_tbl)
