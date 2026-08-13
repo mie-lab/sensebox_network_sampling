@@ -176,7 +176,6 @@ def classify_edge_type(edges):
 
     sidepath = e["is_sidepath"]
 
-    # covariate booleans (kept for modelling, independent of edge_class)
     e["is_cycling_street"] = ((_norm("cyclestreet", e) == "yes") | (_norm("bicycle_road", e) == "yes"))
     e["has_track_tag"] = cw.isin(TRACK_VALS).any(axis=1)
     e["has_lane_tag"] = cw.isin(LANE_VALS).any(axis=1)
@@ -201,7 +200,7 @@ def classify_edge_type(edges):
         ("major_road_shared",  hw.isin(MAIN)),
     ]
     e["edge_class"] = np.select([c for _, c in rules], [r for r, _ in rules], default="other")
-    e.attrs["class_conditions"] = rules   # read by inspect_classification
+    e.attrs["class_conditions"] = rules
     return e
 
 
@@ -267,9 +266,9 @@ def fig_class_small_multiples(edges, column="edge_class", out_dir=OUT_DIR, ncols
             if (edges[column] == c).sum() >= min_edges]
     nrows = -(-len(cats) // ncols)
 
-    fig, axes = plt.subplots(nrows, ncols, figsize=(5 * ncols, 5 * nrows))
+    fig, axes = plt.subplots(nrows, ncols, figsize=(5 * ncols, 5 * nrows), squeeze=False)
     for ax, cat in zip(axes.flat, cats):
-        edges.plot(ax=ax, color="lightgrey", linewidth=0.3)  # the rest of the network
+        edges.plot(ax=ax, color="lightgrey", linewidth=0.3)
         edges[edges[column] == cat].plot(ax=ax, color="crimson", linewidth=0.7)
         ax.set_title(f"{cat} ({km[cat]:.0f} km)", fontsize=11)
         ax.set_axis_off()
@@ -432,6 +431,8 @@ def build_covariates(edges, G):
     # NaN where OSM is silent
     edge_rows["maxspeed_kmh"] = edge_rows["maxspeed"].map(_parse_maxspeed)
     edge_rows["lanes_n"] = pd.to_numeric(edge_rows["lanes"], errors="coerce")
+
+    # 825 directed pairs carry parallel ways and the shortest wins.
     edge_rows = edge_rows.sort_values("length").drop(columns=["maxspeed", "lanes"], errors="ignore")
     agg = {c: "first" for c in edge_rows.columns if c not in ("u", "v")}
     cov = edge_rows.groupby(["u", "v"], as_index=False).agg(agg).rename(columns={"length": "length_m"})
